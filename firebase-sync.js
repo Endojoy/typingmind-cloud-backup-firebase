@@ -285,23 +285,23 @@ if (window.typingMindFirebaseSync) {
             <div id="firebase-config-content" class="space-y-2">
               <div>
                 <label class="block text-xs text-zinc-400 mb-1">API Key</label>
-                <input id="fb-apiKey" type="password" class="w-full px-2 py-1.5 bg-zinc-700 border border-zinc-600 rounded text-white text-sm" value="${this.config.get('apiKey')}">
+                <input id="fb-apiKey" type="password" style="width:100%;padding:6px 8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff;font-size:0.875rem" value="${this.config.get('apiKey')}">
               </div>
               <div>
                 <label class="block text-xs text-zinc-400 mb-1">Auth Domain</label>
-                <input id="fb-authDomain" class="w-full px-2 py-1.5 bg-zinc-700 border border-zinc-600 rounded text-white text-sm" value="${this.config.get('authDomain')}">
+                <input id="fb-authDomain" style="width:100%;padding:6px 8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff;font-size:0.875rem" value="${this.config.get('authDomain')}">
               </div>
               <div>
                 <label class="block text-xs text-zinc-400 mb-1">Project ID</label>
-                <input id="fb-projectId" class="w-full px-2 py-1.5 bg-zinc-700 border border-zinc-600 rounded text-white text-sm" value="${this.config.get('projectId')}">
+                <input id="fb-projectId" style="width:100%;padding:6px 8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff;font-size:0.875rem" value="${this.config.get('projectId')}">
               </div>
               <div>
                 <label class="block text-xs text-zinc-400 mb-1">Storage Bucket</label>
-                <input id="fb-storageBucket" class="w-full px-2 py-1.5 bg-zinc-700 border border-zinc-600 rounded text-white text-sm" value="${this.config.get('storageBucket')}">
+                <input id="fb-storageBucket" style="width:100%;padding:6px 8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff;font-size:0.875rem" value="${this.config.get('storageBucket')}">
               </div>
               <div>
                 <label class="block text-xs text-zinc-400 mb-1">Sync Interval (seconds)</label>
-                <input id="fb-syncInterval" type="number" min="15" class="w-full px-2 py-1.5 bg-zinc-700 border border-zinc-600 rounded text-white text-sm" value="${this.config.get('syncInterval')}">
+                <input id="fb-syncInterval" type="number" min="15" style="width:100%;padding:6px 8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff;font-size:0.875rem" value="${this.config.get('syncInterval')}">
               </div>
             </div>
           </div>
