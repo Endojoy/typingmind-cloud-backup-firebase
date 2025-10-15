@@ -84,101 +84,147 @@ if (window.typingMindFirebaseSync) {
     }
   }
 
-  /* ============================================================
-     3. FirebaseService
-  ============================================================ */
-  class FirebaseService {
-    constructor(config, logger) {
-      this.config = config;
-      this.logger = logger;
-      this.app = null;
-      this.db = null;
-      this.storage = null;
-      this.listeners = [];
-    }
-    async initialize() {
-      if (this.app) return;
-      const cfg = {
-        apiKey: this.config.get('apiKey'),
-        authDomain: this.config.get('authDomain'),
-        projectId: this.config.get('projectId'),
-        storageBucket: this.config.get('storageBucket'),
-      };
-      const [{ initializeApp },
-             { getFirestore, enableIndexedDbPersistence },
-             { getStorage }] = await Promise.all([
-        import('https://www.gstatic.com/firebasejs/9.24.0/firebase-app.js'),
-        import('https://www.gstatic.com/firebasejs/9.24.0/firebase-firestore.js'),
-        import('https://www.gstatic.com/firebasejs/9.24.0/firebase-storage.js'),
-      ]);
-      this.app = initializeApp(cfg, 'tm-sync-' + Date.now());
-      this.db = getFirestore(this.app);
-      this.storage = getStorage(this.app);
-      try {
-        await enableIndexedDbPersistence(this.db);
-      } catch (e) {
-        this.logger.log('warning', 'Offline persistence failed', e.message);
-      }
-      this.logger.log('success', 'Firebase initialized');
-    }
-    async pushLocalChats() {
-      const idb = await this.getIndexedDB();
-      const fb = await import('https://www.gstatic.com/firebasejs/9.24.0/firebase-firestore.js');
-      const store = idb.transaction(['keyval'], 'readonly').objectStore('keyval');
-      return new Promise(done => {
-        store.openCursor().onsuccess = async e => {
-          const cur = e.target.result;
-          if (!cur) { done(); return; }
-          const k = cur.key;
-          if (typeof k === 'string' && k.startsWith('CHAT_')) {
-            const docRef = fb.doc(this.db, 'chats', k);
-            const snap = await fb.getDoc(docRef);
-            const remoteUp = snap.exists() ? snap.data().updatedAt || 0 : 0;
-            if (cur.value.updatedAt > remoteUp) {
-              await fb.setDoc(docRef, { ...cur.value, updatedAt: Date.now() });
-              this.logger.log('success', `Pushed ${k}`);
-            }
-            this.attachListener(k);
-          }
-          cur.continue();
-        };
-      });
-    }
-    async attachListener(chatId) {
-      if (this.listeners.includes(chatId)) return;
-      const fb = await import('https://www.gstatic.com/firebasejs/9.24.0/firebase-firestore.js');
-      const q = fb.query(
-        fb.collection(this.db, 'chats', chatId, 'messages'),
-        fb.orderBy('createdAt'), fb.limitToLast(30)
-      );
-      fb.onSnapshot(q, snap => {
-        if (!snap.docChanges().length) return;
-        this.injectIntoLocal(chatId, snap.docChanges().map(c => c.doc.data()));
-      });
-      this.listeners.push(chatId);
-    }
-    async injectIntoLocal(chatId, msgs) {
-      const idb = await this.getIndexedDB();
-      const tx = idb.transaction(['keyval'], 'readwrite');
-      const st = tx.objectStore('keyval');
-      const req = st.get(chatId);
-      req.onsuccess = () => {
-        const chat = req.result || { messages: [], updatedAt: 0 };
-        msgs.forEach(m => chat.messages.push(m));
-        chat.updatedAt = Date.now();
-        st.put(chat, chatId);
-      };
-    }
-    async getIndexedDB() {
-      return new Promise(res => {
-        const r = indexedDB.open('keyval-store');
-        r.onsuccess = () => res(r.result);
-      });
-    }
+/* ============================================================
+   3. FirebaseService 
+============================================================ */
+class FirebaseService {
+  constructor(config, logger) {
+    this.config = config;
+    this.logger = logger;
+    this.app = null;
+    this.db = null;
+    this.storage = null;
+    this.listeners = [];
+    this.sdkLoaded = false;
   }
 
+  async loadSDK() {
+    if (this.sdkLoaded) return;
+    
+    await this.loadScript('https://www.gstatic.com/firebasejs/9.24.0/firebase-app-compat.js');
+    await this.loadScript('https://www.gstatic.com/firebasejs/9.24.0/firebase-firestore-compat.js');
+    await this.loadScript('https://www.gstatic.com/firebasejs/9.24.0/firebase-storage-compat.js');
+    
+    this.sdkLoaded = true;
+    this.logger.log('success', 'Firebase SDK loaded');
+  }
+
+  loadScript(src) {
+    return new Promise((resolve, reject) => {
+      if (document.querySelector(`script[src="${src}"]`)) {
+        resolve();
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = src;
+      script.async = true;
+      script.onload = resolve;
+      script.onerror = () => reject(new Error(`Failed to load ${src}`));
+      document.head.appendChild(script);
+    });
+  }
+
+  async initialize() {
+    if (this.app) return;
+    
+    await this.loadSDK();
+    
+    const cfg = {
+      apiKey: this.config.get('apiKey'),
+      authDomain: this.config.get('authDomain'),
+      projectId: this.config.get('projectId'),
+      storageBucket: this.config.get('storageBucket'),
+    };
+
+    this.app = firebase.initializeApp(cfg, 'tm-sync-' + Date.now());
+    this.db = firebase.firestore(this.app);
+    this.storage = firebase.storage(this.app);
+    
+    try {
+      await this.db.enablePersistence();
+    } catch (e) {
+      if (e.code === 'failed-precondition') {
+        this.logger.log('warning', 'Multiple tabs open, persistence only in first tab');
+      } else if (e.code === 'unimplemented') {
+        this.logger.log('warning', 'Browser does not support persistence');
+      }
+    }
+    
+    this.logger.log('success', 'Firebase initialized');
+  }
+
+  async pushLocalChats() {
+    const idb = await this.getIndexedDB();
+    const store = idb.transaction(['keyval'], 'readonly').objectStore('keyval');
+    
+    return new Promise(done => {
+      store.openCursor().onsuccess = async e => {
+        const cur = e.target.result;
+        if (!cur) { done(); return; }
+        
+        const k = cur.key;
+        if (typeof k === 'string' && k.startsWith('CHAT_')) {
+          const docRef = this.db.collection('chats').doc(k);
+          const snap = await docRef.get();
+          const remoteUp = snap.exists ? snap.data().updatedAt || 0 : 0;
+          
+          if (cur.value.updatedAt > remoteUp) {
+            await docRef.set({ ...cur.value, updatedAt: Date.now() });
+            this.logger.log('success', `Pushed ${k}`);
+          }
+          
+          this.attachListener(k);
+        }
+        cur.continue();
+      };
+    });
+  }
+
+  attachListener(chatId) {
+    if (this.listeners.includes(chatId)) return;
+    
+    this.db.collection('chats').doc(chatId).collection('messages')
+      .orderBy('createdAt')
+      .limitToLast(30)
+      .onSnapshot(snap => {
+        if (!snap.docChanges().length) return;
+        const msgs = snap.docChanges().map(c => c.doc.data());
+        this.injectIntoLocal(chatId, msgs);
+      });
+    
+    this.listeners.push(chatId);
+    this.logger.log('info', `Listener attached for ${chatId}`);
+  }
+
+  async injectIntoLocal(chatId, msgs) {
+    const idb = await this.getIndexedDB();
+    const tx = idb.transaction(['keyval'], 'readwrite');
+    const st = tx.objectStore('keyval');
+    const req = st.get(chatId);
+    
+    req.onsuccess = () => {
+      const chat = req.result || { messages: [], updatedAt: 0 };
+      msgs.forEach(m => {
+        if (!chat.messages.some(existing => existing.id === m.id)) {
+          chat.messages.push(m);
+        }
+      });
+      chat.updatedAt = Date.now();
+      st.put(chat, chatId);
+      this.logger.log('info', `Injected ${msgs.length} messages into ${chatId}`);
+    };
+  }
+
+  async getIndexedDB() {
+    return new Promise(res => {
+      const r = indexedDB.open('keyval-store');
+      r.onsuccess = () => res(r.result);
+    });
+  }
+}
+
   /* ============================================================
-     4. CloudSyncApp – UI & orchestration
+     4. CloudSyncApp
   ============================================================ */
   class CloudSyncApp {
     constructor() {
