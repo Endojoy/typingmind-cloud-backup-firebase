@@ -1,5 +1,5 @@
 /*──────────────────────────────────────────────────────────────
-  TypingMind – Firebase Cloud-Sync  v2.6  (Oct-2025) - STABLE
+  TypingMind – Firebase Cloud-Sync  v2.7  (Oct-2025) - FIXED
 ──────────────────────────────────────────────────────────────*/
 if (window.typingMindFirebaseSync) {
   console.log("Firebase Sync already loaded");
@@ -19,7 +19,7 @@ if (window.typingMindFirebaseSync) {
         authDomain: '',
         projectId: '',
         storageBucket: '',
-        syncInterval: 15,
+        syncInterval: 30, 
       };
       const stored = {};
       const keyMap = {
@@ -32,7 +32,7 @@ if (window.typingMindFirebaseSync) {
       Object.keys(defaults).forEach(key => {
         const val = localStorage.getItem(keyMap[key]);
         if (val !== null) {
-          stored[key] = key === 'syncInterval' ? parseInt(val) || 15 : val;
+          stored[key] = key === 'syncInterval' ? parseInt(val) || 30 : val;
         }
       });
       return { ...defaults, ...stored };
@@ -101,6 +101,9 @@ class FirebaseService {
     this.mergeLocks = new Map();
     this.syncLocks = new Set();
     this.watcherInterval = null;
+    this.knownChatIds = new Set(); 
+    this.lastFullSync = 0; 
+    this.listenerIgnoreNext = new Map(); 
     
     window.addEventListener('beforeunload', () => {
       if (this.watcherInterval) clearInterval(this.watcherInterval);
@@ -201,6 +204,7 @@ class FirebaseService {
       try { l.unsubscribe(); } catch {}
     });
     this.listeners = [];
+    this.knownChatIds.clear();
   }
 
   startChatWatcher() {
@@ -219,8 +223,9 @@ class FirebaseService {
             );
             
             keys.forEach(chatId => {
-              if (!this.listeners.some(l => l.chatId === chatId)) {
-                this.logger.log('info', `New chat detected: ${chatId}`);
+              if (!this.knownChatIds.has(chatId)) {
+                this.logger.log('info', `📝 New chat detected: ${chatId}`);
+                this.knownChatIds.add(chatId);
                 this.attachListener(chatId);
               }
             });
@@ -231,9 +236,9 @@ class FirebaseService {
       } catch (e) {
         this.logger.log('error', 'Chat watcher error', e);
       }
-    }, 5000);
+    }, 10000); 
     
-    this.logger.log('info', 'Chat watcher started (checking every 5s)');
+    this.logger.log('info', '👀 Chat watcher started (checking every 10s)');
   }
 
   async pushLocalChats() {
@@ -243,6 +248,7 @@ class FirebaseService {
     }
 
     this.isSyncing = true;
+    const now = Date.now();
 
     try {
       if (!this.db) {
@@ -254,6 +260,7 @@ class FirebaseService {
       const store = tx.objectStore('keyval');
       
       const chatsToSync = [];
+      const recentThreshold = now - (7 * 24 * 60 * 60 * 1000); 
       
       await new Promise((resolve, reject) => {
         store.openCursor().onsuccess = (e) => {
@@ -265,22 +272,35 @@ class FirebaseService {
 
           const k = cur.key;
           if (typeof k === 'string' && k.startsWith('CHAT_')) {
-            chatsToSync.push({ 
-              key: k, 
-              value: cur.value
-            });
+            const value = cur.value;
+            
+            const shouldSync = 
+              (this.lastFullSync === 0) || 
+              !value.syncedAt || 
+              (value.updatedAt && value.updatedAt > recentThreshold) || 
+              (value.syncedAt && value.updatedAt > value.syncedAt); 
+            
+            if (shouldSync) {
+              chatsToSync.push({ 
+                key: k, 
+                value: value
+              });
+            }
           }
           cur.continue();
         };
         store.openCursor().onerror = reject;
       });
 
-      this.logger.log('info', `Syncing ${chatsToSync.length} chats...`);
+      this.logger.log('info', `🔄 Syncing ${chatsToSync.length} chats (${this.lastFullSync === 0 ? 'FULL' : 'INCREMENTAL'})...`);
       
       for (const { key, value } of chatsToSync) {
         const normalized = FirebaseService.normalizeChat(value, key);
         await this.syncChatRecord(key, normalized);
+        this.knownChatIds.add(key); 
       }
+
+      this.lastFullSync = now;
 
     } finally {
       this.isSyncing = false;
@@ -529,7 +549,9 @@ class FirebaseService {
       });
 
       if (messagesToUpload.length > 0) {
-        this.logger.log('info', `Uploading ${messagesToUpload.length} messages to ${chatId}`);
+        this.listenerIgnoreNext.set(chatId, Date.now() + 5000); 
+        
+        this.logger.log('info', `📤 Uploading ${messagesToUpload.length} messages to ${chatId}`);
         
         const maxBatchSize = 400;
         for (let i = 0; i < messagesToUpload.length; i += maxBatchSize) {
@@ -562,7 +584,7 @@ class FirebaseService {
       );
 
       if (remoteMsgsToDownload.length > 0) {
-        this.logger.log('info', `Downloading ${remoteMsgsToDownload.length} messages from ${chatId}`);
+        this.logger.log('info', `📥 Downloading ${remoteMsgsToDownload.length} messages from ${chatId}`);
         await this.mergeIntoLocal(chatId, remoteMsgsToDownload);
       }
 
@@ -615,60 +637,27 @@ class FirebaseService {
     }
 
     if (this.listeners.some(l => l.chatId === chatId)) {
+      this.logger.log('warning', `Listener already exists for ${chatId}`);
       return;
     }
 
-    let lastVisible = null;
-    const pageSize = 50;
 
-    const loadPage = async () => {
-      try {
-        let query = this.db
-          .collection('chats').doc(chatId).collection('messages')
-          .orderBy('createdAt', 'desc')
-          .limit(pageSize);
-
-        if (lastVisible) {
-          query = query.startAfter(lastVisible);
-        }
-
-        const snapshot = await query.get();
-        
-        if (!snapshot.empty) {
-          lastVisible = snapshot.docs[snapshot.docs.length - 1];
-          
-          const messages = snapshot.docs.map(d => {
-            const data = d.data();
-            return {
-              id: d.id,
-              ...data,
-              createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : data.createdAt,
-              updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : data.updatedAt
-            };
-          });
-          
-          await this.mergeIntoLocal(chatId, messages);
-        }
-
-        return snapshot.size === pageSize;
-      } catch (e) {
-        this.logger.log('error', `Failed to load page for ${chatId}`, e);
-        return false;
-      }
-    };
-
-    (async () => {
-      let hasMore = true;
-      while (hasMore) {
-        hasMore = await loadPage();
-      }
-    })();
+    const fiveMinutesAgo = firebase.firestore.Timestamp.fromMillis(
+      Date.now() - (5 * 60 * 1000)
+    );
 
     const unsubscribe = this.db
       .collection('chats').doc(chatId).collection('messages')
-      .orderBy('createdAt', 'desc')
-      .limit(100)
+      .where('updatedAt', '>=', fiveMinutesAgo) 
+      .orderBy('updatedAt', 'desc')
+      .limit(50)
       .onSnapshot(snap => {
+        const ignoreUntil = this.listenerIgnoreNext.get(chatId) || 0;
+        if (Date.now() < ignoreUntil) {
+          this.logger.log('info', `🔇 Ignoring listener event for ${chatId} (own upload)`);
+          return;
+        }
+
         if (!snap.docChanges().length || this.isSyncing) return;
         
         const changes = snap.docChanges();
@@ -690,6 +679,7 @@ class FirebaseService {
           .map(c => c.doc.id);
         
         if (msgsToInject.length > 0) {
+          this.logger.log('info', `📨 Listener received ${msgsToInject.length} messages for ${chatId}`);
           this.mergeIntoLocal(chatId, msgsToInject).catch(e => {
             this.logger.log('error', 'Failed to merge messages', e);
           });
@@ -705,7 +695,7 @@ class FirebaseService {
       });
 
     this.listeners.push({ chatId, unsubscribe });
-    this.logger.log('info', `Listener attached for ${chatId}`);
+    this.logger.log('info', `👂 Listener attached for ${chatId} (recent messages only)`);
   }
 
   async mergeIntoLocal(chatId, msgs) {
@@ -847,7 +837,7 @@ class FirebaseService {
         const putReq = st.put(chat, chatId);
         putReq.onsuccess = () => {
           if (addedCount > 0 || updatedCount > 0) {
-            this.logger.log('info', `Merged into ${chatId}: +${addedCount} new, ~${updatedCount} updated`);
+            this.logger.log('info', `✅ Merged into ${chatId}: +${addedCount} new, ~${updatedCount} updated`);
           }
         };
         putReq.onerror = () => {
@@ -894,7 +884,7 @@ class FirebaseService {
           chat.updatedAt = Date.now();
           const putReq = st.put(chat, chatId);
           putReq.onsuccess = () => {
-            this.logger.log('info', `Removed ${removed} messages from ${chatId}`);
+            this.logger.log('info', `🗑️ Removed ${removed} messages from ${chatId}`);
             resolve();
           };
           putReq.onerror = () => reject(putReq.error);
@@ -968,7 +958,7 @@ class FirebaseService {
     }
     
     async initialize() {
-      this.logger.log('start', 'Initializing Firebase Sync v2.6');
+      this.logger.log('start', '🚀 Initializing Firebase Sync v2.7 (FIXED)');
       await this.waitForDOM();
       this.insertSyncButton();
 
@@ -993,8 +983,11 @@ class FirebaseService {
                 const keys = e.target.result.filter(k => 
                   typeof k === 'string' && k.startsWith('CHAT_')
                 );
-                this.logger.log('info', `Attaching listeners to ${keys.length} chats`);
-                keys.forEach(chatId => this.firebase.attachListener(chatId));
+                this.logger.log('info', `🎧 Attaching listeners to ${keys.length} chats`);
+                keys.forEach(chatId => {
+                  this.firebase.knownChatIds.add(chatId);
+                  this.firebase.attachListener(chatId);
+                });
                 resolve();
               };
             });
@@ -1112,8 +1105,8 @@ class FirebaseService {
                 <input id="fb-storageBucket" style="width:100%;padding:6px 8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff;font-size:0.875rem" value="${this.config.get('storageBucket')}">
               </div>
               <div>
-                <label class="block text-xs text-zinc-400 mb-1">Sync Interval (seconds)</label>
-                <input id="fb-syncInterval" type="number" min="15" style="width:100%;padding:6px 8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff;font-size:0.875rem" value="${this.config.get('syncInterval')}">
+                <label class="block text-xs text-zinc-400 mb-1">Sync Interval (seconds, min: 30)</label>
+                <input id="fb-syncInterval" type="number" min="30" style="width:100%;padding:6px 8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff;font-size:0.875rem" value="${this.config.get('syncInterval')}">
               </div>
             </div>
           </div>
@@ -1129,7 +1122,7 @@ class FirebaseService {
           <div id="action-msg" class="text-center text-zinc-400 mt-3"></div>
           
           <div class="text-center mt-4 pt-3 text-xs text-zinc-500 border-t border-zinc-700">
-            <span>Firebase Cloud Sync v2.6 STABLE for TypingMind</span>
+            <span>Firebase Cloud Sync v2.7 FIXED for TypingMind</span>
           </div>
         </div>`;
     }
@@ -1184,7 +1177,7 @@ class FirebaseService {
         authDomain: get('#fb-authDomain'),
         projectId: get('#fb-projectId'),
         storageBucket: get('#fb-storageBucket'),
-        syncInterval: get('#fb-syncInterval'),
+        syncInterval: Math.max(parseInt(get('#fb-syncInterval')), 30), 
       };
 
       if (!newConfig.apiKey || !newConfig.authDomain || !newConfig.projectId || !newConfig.storageBucket) {
@@ -1249,30 +1242,37 @@ class FirebaseService {
     
     startAutoSync() {
       if (this.autoSyncInterval) clearInterval(this.autoSyncInterval);
-      const interval = Math.max(this.config.get('syncInterval') * 1000, 15000);
+      const interval = Math.max(this.config.get('syncInterval') * 1000, 30000); 
       
       this.autoSyncInterval = setInterval(async () => {
-        if (this.firebase.isSyncing) return;
+        if (this.firebase.isSyncing) {
+          this.logger.log('info', '⏸️ Auto-sync skipped (already syncing)');
+          return;
+        }
         
         if (this.lastSyncTime) {
           const timeSinceLastSync = Date.now() - this.lastSyncTime;
-          if (timeSinceLastSync < interval) return;
+          if (timeSinceLastSync < interval) {
+            this.logger.log('info', `⏸️ Auto-sync skipped (last sync ${Math.round(timeSinceLastSync/1000)}s ago)`);
+            return;
+          }
         }
         
-        this.logger.log('info', 'Auto-sync triggered');
+        this.logger.log('info', '⏰ Auto-sync triggered');
         this.updateSyncStatus('syncing');
         
         try {
           await this.firebase.pushLocalChats();
           this.updateSyncStatus('success');
           this.lastSyncTime = Date.now();
+          this.logger.log('success', '✅ Auto-sync completed');
         } catch (e) {
           this.logger.log('error', 'Auto-sync failed', e.message);
           this.updateSyncStatus('error');
         }
       }, interval);
       
-      this.logger.log('success', `Auto-sync started (every ${interval / 1000}s)`);
+      this.logger.log('success', `⏰ Auto-sync started (every ${interval / 1000}s, min interval respected)`);
     }
   }
 
