@@ -138,11 +138,14 @@ class FirebaseService {
       storageBucket: this.config.get('storageBucket')
     };
 
-    this.app     = firebase.initializeApp(cfg, 'tm-sync');
+    this.app = firebase.initializeApp(cfg, 'tm-sync');  
+    firebase.firestore().settings({                      
+      experimentalForceLongPolling: true,
+      useFetchStreams: false
+    });
     this.db      = firebase.firestore(this.app);
     this.storage = firebase.storage(this.app);
 
-    this.db.settings({ experimentalForceLongPolling: true, useFetchStreams: false });
 
     try { await this.db.enablePersistence(); } catch {}
     this.logger.log('success', 'Firebase initialized');
