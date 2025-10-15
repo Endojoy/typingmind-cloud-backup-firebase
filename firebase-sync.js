@@ -142,6 +142,8 @@ class FirebaseService {
     this.db      = firebase.firestore(this.app);
     this.storage = firebase.storage(this.app);
 
+    this.db.settings({ experimentalForceLongPolling: true, useFetchStreams: false });
+
     try { await this.db.enablePersistence(); } catch {}
     this.logger.log('success', 'Firebase initialized');
   }
