@@ -1,5 +1,5 @@
 /*──────────────────────────────────────────────────────────────
-  TypingMind – Firebase Cloud-Sync  v2.4  (Oct-2025) - STABLE
+  TypingMind – Firebase Cloud-Sync  v2.5  (Oct-2025) - STABLE
 ──────────────────────────────────────────────────────────────*/
 if (window.typingMindFirebaseSync) {
   console.log("Firebase Sync already loaded");
@@ -252,6 +252,33 @@ class FirebaseService {
     }
   }
 
+  static toValidTimestamp(value) {
+    if (!value) return firebase.firestore.Timestamp.now();
+    
+    if (value instanceof firebase.firestore.Timestamp) return value;
+    
+    if (value instanceof Date) {
+      if (isNaN(value.getTime())) return firebase.firestore.Timestamp.now();
+      return firebase.firestore.Timestamp.fromDate(value);
+    }
+    
+    if (typeof value === 'number') {
+      if (!isFinite(value) || value < 0 || value > 8640000000000000) {
+        return firebase.firestore.Timestamp.now();
+      }
+      return firebase.firestore.Timestamp.fromMillis(value);
+    }
+    
+    if (typeof value === 'string') {
+      const parsed = Date.parse(value);
+      if (!isNaN(parsed)) {
+        return firebase.firestore.Timestamp.fromMillis(parsed);
+      }
+    }
+    
+    return firebase.firestore.Timestamp.now();
+  }
+
   static sanitizeForFirestore(value, seen = new WeakSet()) {
     if (value === null || value === undefined) return value;
     
@@ -262,8 +289,10 @@ class FirebaseService {
     ) return value;
 
     if (value instanceof firebase.firestore.Timestamp) return value;
-    if (value instanceof Date) return firebase.firestore.Timestamp.fromDate(value);
-    if (typeof value === 'number') return firebase.firestore.Timestamp.fromMillis(value);
+    
+    if (value instanceof Date || typeof value === 'number') {
+      return FirebaseService.toValidTimestamp(value);
+    }
 
     if (Array.isArray(value)) {
       return value
@@ -365,16 +394,28 @@ class FirebaseService {
       const docRef = this.db.collection('chats').doc(chatId);
       
       const snap = await docRef.get();
-      const remoteUp = snap.exists ? snap.data().updatedAt || 0 : 0;
+      
+      let remoteUp = 0;
+      if (snap.exists) {
+        const data = snap.data();
+        if (data && data.updatedAt) {
+          if (data.updatedAt.toMillis) {
+            remoteUp = data.updatedAt.toMillis();
+          } else if (typeof data.updatedAt === 'number') {
+            remoteUp = data.updatedAt;
+          }
+        }
+      }
+      
       const hasMetaChange = localData.updatedAt > remoteUp;
 
       if (hasMetaChange) {
         await docRef.set(
-          FirebaseService.sanitizeForFirestore({
-            title: localData.title,
-            updatedAt: firebase.firestore.Timestamp.fromMillis(Date.now()),
-            createdAt: firebase.firestore.Timestamp.fromMillis(localData.createdAt)
-          }),
+          {
+            title: localData.title || 'Chat',
+            updatedAt: FirebaseService.toValidTimestamp(Date.now()),
+            createdAt: FirebaseService.toValidTimestamp(localData.createdAt)
+          },
           { merge: true }
         );
       }
@@ -383,10 +424,15 @@ class FirebaseService {
         .orderBy('createdAt')
         .get();
       
-      const remoteMessages = remoteSnapshot.docs.map(d => ({
-        id: d.id,
-        ...d.data()
-      }));
+      const remoteMessages = remoteSnapshot.docs.map(d => {
+        const data = d.data();
+        return {
+          id: d.id,
+          ...data,
+          createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : data.createdAt,
+          updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : data.updatedAt
+        };
+      });
 
       const remoteMap = new Map(remoteMessages.map(m => [m.id, m]));
       
@@ -420,13 +466,22 @@ class FirebaseService {
         if (shouldUpload) {
           const msgCopy = { 
             ...msg, 
-            id: docId, 
-            updatedAt: firebase.firestore.Timestamp.fromMillis(Date.now()),
-            createdAt: firebase.firestore.Timestamp.fromMillis(msg.createdAt || Date.now())
+            id: docId
           };
-          const sanitized = FirebaseService.sanitizeForFirestore(msgCopy);
           
-          if (sanitized) {
+          const sanitized = {};
+          for (const [key, val] of Object.entries(msgCopy)) {
+            if (key === 'createdAt' || key === 'updatedAt') {
+              sanitized[key] = FirebaseService.toValidTimestamp(val);
+            } else {
+              const clean = FirebaseService.sanitizeForFirestore(val);
+              if (clean !== undefined) {
+                sanitized[key] = clean;
+              }
+            }
+          }
+          
+          if (sanitized && Object.keys(sanitized).length > 0) {
             messagesToUpload.push({ id: docId, data: sanitized });
           }
         }
@@ -540,10 +595,15 @@ class FirebaseService {
       if (!snapshot.empty) {
         lastVisible = snapshot.docs[snapshot.docs.length - 1];
         
-        const messages = snapshot.docs.map(d => ({
-          id: d.id,
-          ...d.data()
-        }));
+        const messages = snapshot.docs.map(d => {
+          const data = d.data();
+          return {
+            id: d.id,
+            ...data,
+            createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : data.createdAt,
+            updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : data.updatedAt
+          };
+        });
         
         await this.mergeIntoLocal(chatId, messages);
       }
@@ -569,7 +629,15 @@ class FirebaseService {
         
         const msgsToInject = changes
           .filter(c => c.type === 'added' || c.type === 'modified')
-          .map(c => ({ id: c.doc.id, ...c.doc.data() }));
+          .map(c => {
+            const data = c.doc.data();
+            return {
+              id: c.doc.id,
+              ...data,
+              createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : data.createdAt,
+              updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : data.updatedAt
+            };
+          });
         
         const msgsToRemove = changes
           .filter(c => c.type === 'removed')
@@ -854,7 +922,7 @@ class FirebaseService {
     }
     
     async initialize() {
-      this.logger.log('start', 'Initializing Firebase Sync v2.4');
+      this.logger.log('start', 'Initializing Firebase Sync v2.5');
       await this.waitForDOM();
       this.insertSyncButton();
 
@@ -1013,7 +1081,7 @@ class FirebaseService {
           <div id="action-msg" class="text-center text-zinc-400 mt-3"></div>
           
           <div class="text-center mt-4 pt-3 text-xs text-zinc-500 border-t border-zinc-700">
-            <span>Firebase Cloud Sync v2.4 STABLE for TypingMind</span>
+            <span>Firebase Cloud Sync v2.5 STABLE for TypingMind</span>
           </div>
         </div>`;
     }
