@@ -209,11 +209,22 @@ class FirebaseService {
     const remoteUp = snap.exists ? snap.data().updatedAt || 0 : 0;
 
     if (localData.updatedAt > remoteUp) {
-      const clean = FirebaseService.stripUndefined(localData);  
-      clean.updatedAt = Date.now();
-      await docRef.set(clean);
-      this.logger.log('success', `Pushed ${chatId}`);
+      await docRef.set(
+        { updatedAt: Date.now(),  },
+        { merge: true }
+      );
     }
+
+    const batch = this.db.batch();
+    const cleanMsgs = (localData.messages || []).map(stripUndefined);
+
+    for (const msg of cleanMsgs) {
+      const mRef = docRef.collection('messages').doc(msg.id.toString());
+      batch.set(mRef, msg, { merge: true });    
+    }
+    if (cleanMsgs.length) await batch.commit();
+
+    this.logger.log('success', `Pushed ${chatId} (${cleanMsgs.length} msgs)`);
     this.attachListener(chatId);
   }
 
