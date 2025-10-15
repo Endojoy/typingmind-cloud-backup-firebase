@@ -1,5 +1,5 @@
 /*──────────────────────────────────────────────────────────────
-  TypingMind – Firebase Cloud-Sync  v2.5  (Oct-2025) - STABLE
+  TypingMind – Firebase Cloud-Sync  v2.6  (Oct-2025) - STABLE
 ──────────────────────────────────────────────────────────────*/
 if (window.typingMindFirebaseSync) {
   console.log("Firebase Sync already loaded");
@@ -100,8 +100,10 @@ class FirebaseService {
     this.dbInstance = null;
     this.mergeLocks = new Map();
     this.syncLocks = new Set();
+    this.watcherInterval = null;
     
     window.addEventListener('beforeunload', () => {
+      if (this.watcherInterval) clearInterval(this.watcherInterval);
       this.listeners.forEach(l => {
         try { l.unsubscribe(); } catch {}
       });
@@ -199,6 +201,39 @@ class FirebaseService {
       try { l.unsubscribe(); } catch {}
     });
     this.listeners = [];
+  }
+
+  startChatWatcher() {
+    if (this.watcherInterval) return;
+    
+    this.watcherInterval = setInterval(async () => {
+      try {
+        const idb = await this.getIndexedDB();
+        const tx = idb.transaction(['keyval'], 'readonly');
+        const store = tx.objectStore('keyval');
+        
+        await new Promise((resolve) => {
+          store.getAllKeys().onsuccess = (e) => {
+            const keys = e.target.result.filter(k => 
+              typeof k === 'string' && k.startsWith('CHAT_')
+            );
+            
+            keys.forEach(chatId => {
+              if (!this.listeners.some(l => l.chatId === chatId)) {
+                this.logger.log('info', `New chat detected: ${chatId}`);
+                this.attachListener(chatId);
+              }
+            });
+            
+            resolve();
+          };
+        });
+      } catch (e) {
+        this.logger.log('error', 'Chat watcher error', e);
+      }
+    }, 5000);
+    
+    this.logger.log('info', 'Chat watcher started (checking every 5s)');
   }
 
   async pushLocalChats() {
@@ -439,6 +474,8 @@ class FirebaseService {
       const messagesToUpload = [];
       const localIndexToId = new Map();
       
+      const lastSynced = localData.syncedAt || 0;
+      
       localData.messages.forEach((msg, index) => {
         if (!msg || typeof msg !== 'object') return;
 
@@ -457,13 +494,17 @@ class FirebaseService {
             shouldUpload = localTime > remoteTime;
           }
         } else {
-          const newDocRef = docRef.collection('messages').doc();
-          docId = newDocRef.id;
-          shouldUpload = true;
-          localIndexToId.set(index, docId);
+          const msgTime = msg.updatedAt || msg.createdAt || 0;
+          
+          if (msgTime > lastSynced) {
+            const newDocRef = docRef.collection('messages').doc();
+            docId = newDocRef.id;
+            shouldUpload = true;
+            localIndexToId.set(index, docId);
+          }
         }
 
-        if (shouldUpload) {
+        if (shouldUpload && docId) {
           const msgCopy = { 
             ...msg, 
             id: docId
@@ -581,34 +622,39 @@ class FirebaseService {
     const pageSize = 50;
 
     const loadPage = async () => {
-      let query = this.db
-        .collection('chats').doc(chatId).collection('messages')
-        .orderBy('createdAt', 'desc')
-        .limit(pageSize);
+      try {
+        let query = this.db
+          .collection('chats').doc(chatId).collection('messages')
+          .orderBy('createdAt', 'desc')
+          .limit(pageSize);
 
-      if (lastVisible) {
-        query = query.startAfter(lastVisible);
-      }
+        if (lastVisible) {
+          query = query.startAfter(lastVisible);
+        }
 
-      const snapshot = await query.get();
-      
-      if (!snapshot.empty) {
-        lastVisible = snapshot.docs[snapshot.docs.length - 1];
+        const snapshot = await query.get();
         
-        const messages = snapshot.docs.map(d => {
-          const data = d.data();
-          return {
-            id: d.id,
-            ...data,
-            createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : data.createdAt,
-            updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : data.updatedAt
-          };
-        });
-        
-        await this.mergeIntoLocal(chatId, messages);
-      }
+        if (!snapshot.empty) {
+          lastVisible = snapshot.docs[snapshot.docs.length - 1];
+          
+          const messages = snapshot.docs.map(d => {
+            const data = d.data();
+            return {
+              id: d.id,
+              ...data,
+              createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : data.createdAt,
+              updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : data.updatedAt
+            };
+          });
+          
+          await this.mergeIntoLocal(chatId, messages);
+        }
 
-      return snapshot.size === pageSize;
+        return snapshot.size === pageSize;
+      } catch (e) {
+        this.logger.log('error', `Failed to load page for ${chatId}`, e);
+        return false;
+      }
     };
 
     (async () => {
@@ -922,7 +968,7 @@ class FirebaseService {
     }
     
     async initialize() {
-      this.logger.log('start', 'Initializing Firebase Sync v2.5');
+      this.logger.log('start', 'Initializing Firebase Sync v2.6');
       await this.waitForDOM();
       this.insertSyncButton();
 
@@ -955,6 +1001,8 @@ class FirebaseService {
           } catch (e) {
             this.logger.log('error', 'Failed to attach listeners', e);
           }
+          
+          this.firebase.startChatWatcher();
           
           this.startAutoSync();
           this.updateSyncStatus('success');
@@ -1081,7 +1129,7 @@ class FirebaseService {
           <div id="action-msg" class="text-center text-zinc-400 mt-3"></div>
           
           <div class="text-center mt-4 pt-3 text-xs text-zinc-500 border-t border-zinc-700">
-            <span>Firebase Cloud Sync v2.5 STABLE for TypingMind</span>
+            <span>Firebase Cloud Sync v2.6 STABLE for TypingMind</span>
           </div>
         </div>`;
     }
