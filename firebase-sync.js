@@ -144,6 +144,7 @@ class FirebaseService {
       useFetchStreams: false
     });
     this.db      = firebase.firestore(this.app);
+    console.log('init ok')
     this.storage = firebase.storage(this.app);
 
 
