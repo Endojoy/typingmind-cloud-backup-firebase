@@ -447,28 +447,35 @@ class FirebaseService {
       }
     }
     async handleSyncNow(modal) {
-      const syncBtn = modal.querySelector('#sync-now');
+      try {
+        if (!this.firebase.app) {
+          await this.firebase.initialize();           
+          console.log('init ok');
+        }
+      } catch (e) {
+        alert('Firebase init failed : ' + e.message);
+        return;
+      }
+
+      const syncBtn   = modal.querySelector('#sync-now');
       const actionMsg = modal.querySelector('#action-msg');
-      const originalText = syncBtn.textContent;
+      const original  = syncBtn.textContent;
       syncBtn.disabled = true;
-      syncBtn.textContent = 'Syncing...';
-      actionMsg.textContent = 'Synchronizing...';
+      syncBtn.textContent = 'Syncing…';
       this.updateSyncStatus('syncing');
 
       try {
-        if (!this.firebase.app) await this.firebase.initialize();
         await this.firebase.pushLocalChats();
         actionMsg.textContent = '✅ Sync completed!';
         actionMsg.style.color = '#22c55e';
         this.updateSyncStatus('success');
       } catch (e) {
-        this.logger.log('error', 'Sync failed', e.message);
         actionMsg.textContent = `❌ Sync failed: ${e.message}`;
         actionMsg.style.color = '#ef4444';
         this.updateSyncStatus('error');
       } finally {
         setTimeout(() => {
-          syncBtn.textContent = originalText;
+          syncBtn.textContent = original;
           syncBtn.disabled = false;
         }, 2000);
       }
