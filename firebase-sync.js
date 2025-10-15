@@ -63,12 +63,26 @@ if (window.typingMindFirebaseSync) {
   /* ============================================================
      2. Logger
   ============================================================ */
-  const log = (type, message, data) => {
-    const urlParams = new URLSearchParams(window.location.search);
-    if (!urlParams.has('log')) return;
-    const icons = { info: 'ℹ️', success: '✅', warning: '⚠️', error: '❌', start: '🔄' };
-    console.log(`${icons[type] || 'ℹ️'} [FirebaseSync] ${message}`, data || '');
-  };
+  class Logger {
+    constructor() {
+      const urlParams = new URLSearchParams(window.location.search);
+      this.enabled = urlParams.get('log') === 'true' || urlParams.has('log');
+    }
+    log(type, message, data = null) {
+      if (!this.enabled) return;
+      const timestamp = new Date().toLocaleTimeString();
+      const icons = { info: 'ℹ️', success: '✅', warning: '⚠️', error: '❌', start: '🔄' };
+      const icon = icons[type] || 'ℹ️';
+      console.log(`${icon} [${timestamp}] ${message}`, data || '');
+    }
+    setEnabled(enabled) {
+      this.enabled = enabled;
+      const url = new URL(window.location);
+      if (enabled) url.searchParams.set('log', '');
+      else url.searchParams.delete('log');
+      window.history.replaceState({}, '', url);
+    }
+  }
 
 /* ============================================================
    3. FirebaseService 
@@ -114,36 +128,30 @@ class FirebaseService {
   }
 
   async initialize() {
-    if (this.app) return;            
+    await this.loadSDK();                 
 
-    try {
-      await this.loadSDK();          
-
+    if (!this.app) {
       const cfg = {
         apiKey       : this.config.get('apiKey'),
         authDomain   : this.config.get('authDomain'),
         projectId    : this.config.get('projectId'),
         storageBucket: this.config.get('storageBucket')
       };
-
       this.app = firebase.initializeApp(cfg, 'tm-sync');
-
-      firebase.firestore().settings({
-        experimentalForceLongPolling: true,
-        useFetchStreams            : false
-      });
-
-      this.db      = firebase.firestore(this.app);
-      this.storage = firebase.storage(this.app);
-
-      try { await this.db.enablePersistence(); } catch {}
-
-      console.log('init ok');       
-      this.logger.log('success', 'Firebase initialized');
-    } catch (e) {
-      this.logger.log('error', 'initialize failed', e);
-      throw e;                       
     }
+
+    firebase.firestore().settings({
+      experimentalForceLongPolling: true,
+      useFetchStreams            : false
+    });
+
+    this.db      = firebase.firestore(this.app);
+    this.storage = firebase.storage(this.app);
+
+    try { await this.db.enablePersistence(); } catch {}
+
+    console.log('init ok');               
+    this.logger.log('success', 'Firebase initialised');
   }
 
   async pushLocalChats() {
@@ -442,26 +450,22 @@ class FirebaseService {
         saveBtn.textContent = 'Save & Verify';
       }
     }
-
     async handleSyncNow(modal) {
-      const actionMsg = modal.querySelector('#action-msg');
-      const syncBtn = modal.querySelector('#sync-now');
-      const originalText = syncBtn.textContent;
-
-      if (!this.firebase.db) {
-        actionMsg.textContent = 'Initializing...';
-        try {
-          await this.firebase.initialize();
-        } catch (e) {
-          actionMsg.textContent = `❌ Init failed: ${e.message}`;
-          actionMsg.style.color = '#ef4444';
-          return;
+      try {
+        if (!this.firebase.db) {
+          await this.firebase.initialize();           
+          console.log('init ok');
         }
+      } catch (e) {
+        alert('Firebase init failed : ' + e.message);
+        return;
       }
 
+      const syncBtn   = modal.querySelector('#sync-now');
+      const actionMsg = modal.querySelector('#action-msg');
+      const original  = syncBtn.textContent;
       syncBtn.disabled = true;
       syncBtn.textContent = 'Syncing…';
-      actionMsg.textContent = 'Synchronizing...';
       this.updateSyncStatus('syncing');
 
       try {
@@ -475,12 +479,11 @@ class FirebaseService {
         this.updateSyncStatus('error');
       } finally {
         setTimeout(() => {
-          syncBtn.textContent = originalText;
+          syncBtn.textContent = original;
           syncBtn.disabled = false;
         }, 2000);
       }
     }
-
     startAutoSync() {
       if (this.autoSyncInterval) clearInterval(this.autoSyncInterval);
       const interval = Math.max(this.config.get('syncInterval') * 1000, 15000);
