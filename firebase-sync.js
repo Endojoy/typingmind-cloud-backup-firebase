@@ -1,5 +1,5 @@
 /*──────────────────────────────────────────────────────────────
-  TypingMind – Firebase Cloud-Sync  v1.2  (Oct-2025) - FINAL FINAL FINAL
+  TypingMind – Firebase Cloud-Sync  v2.4  (Oct-2025) - STABLE
 ──────────────────────────────────────────────────────────────*/
 if (window.typingMindFirebaseSync) {
   console.log("Firebase Sync already loaded");
@@ -78,7 +78,7 @@ if (window.typingMindFirebaseSync) {
     setEnabled(enabled) {
       this.enabled = enabled;
       const url = new URL(window.location);
-      if (enabled) url.searchParams.set('log', '');
+      if (enabled) url.searchParams.set('log', 'true');
       else url.searchParams.delete('log');
       window.history.replaceState({}, '', url);
     }
@@ -98,7 +98,8 @@ class FirebaseService {
     this.sdkLoaded = false;
     this.isSyncing = false;
     this.dbInstance = null;
-    this.mergeQueue = new Map();  // ✅ FIX: Queue au lieu de busy-wait
+    this.mergeLocks = new Map();
+    this.syncLocks = new Set();
     
     window.addEventListener('beforeunload', () => {
       this.listeners.forEach(l => {
@@ -114,7 +115,7 @@ class FirebaseService {
     if (existing) {
       await this.waitForFirebaseGlobal();
       this.sdkLoaded = true;
-      this.logger.log('success', 'Firebase SDK déjà présent');
+      this.logger.log('success', 'Firebase SDK already present');
       return;
     }
 
@@ -122,13 +123,13 @@ class FirebaseService {
 
     await this.loadScript(SRC, {
       id: 'firebase-compat',
-      crossOrigin: 'anonymous'
+      crossorigin: 'anonymous'
     });
 
     await this.waitForFirebaseGlobal();
 
     this.sdkLoaded = true;
-    this.logger.log('success', 'Firebase SDK 9.22.2 chargé');
+    this.logger.log('success', 'Firebase SDK 9.22.2 loaded');
   }
 
   waitForFirebaseGlobal() {
@@ -142,7 +143,7 @@ class FirebaseService {
         }
         if (++attempts > max) {
           clearInterval(timer);
-          return reject(new Error('firebase global introuvable'));
+          return reject(new Error('firebase global not found'));
         }
       }, 500);
     });
@@ -155,7 +156,7 @@ class FirebaseService {
       s.async = true;
       Object.entries(attrs).forEach(([k, v]) => s.setAttribute(k, v));
       s.onload = ok;
-      s.onerror = () => err(new Error(`Échec chargement ${src}`));
+      s.onerror = () => err(new Error(`Failed loading ${src}`));
       document.head.appendChild(s);
     });
   }
@@ -176,12 +177,8 @@ class FirebaseService {
     }
 
     if (!firebase.auth().currentUser) {
-      try {
-        await firebase.auth().signInAnonymously();
-        this.logger.log('success', 'Signed-in anonymously');
-      } catch (e) {
-        this.logger.log('error', 'Anonymous sign-in failed', e);
-      }
+      await firebase.auth().signInAnonymously();
+      this.logger.log('success', 'Signed-in anonymously');
     }
 
     if (!this.db) {
@@ -197,6 +194,11 @@ class FirebaseService {
         await this.db.enablePersistence({ synchronizeTabs: true });
       } catch (_) {}
     }
+    
+    this.listeners.forEach(l => {
+      try { l.unsubscribe(); } catch {}
+    });
+    this.listeners = [];
   }
 
   async pushLocalChats() {
@@ -230,7 +232,7 @@ class FirebaseService {
           if (typeof k === 'string' && k.startsWith('CHAT_')) {
             chatsToSync.push({ 
               key: k, 
-              value: FirebaseService.normalizeChat(cur.value, k) 
+              value: cur.value
             });
           }
           cur.continue();
@@ -241,7 +243,8 @@ class FirebaseService {
       this.logger.log('info', `Syncing ${chatsToSync.length} chats...`);
       
       for (const { key, value } of chatsToSync) {
-        await this.syncChatRecord(key, value);
+        const normalized = FirebaseService.normalizeChat(value, key);
+        await this.syncChatRecord(key, normalized);
       }
 
     } finally {
@@ -250,29 +253,26 @@ class FirebaseService {
   }
 
   static sanitizeForFirestore(value, seen = new WeakSet()) {
+    if (value === null || value === undefined) return value;
+    
     if (
-      value === null ||
       typeof value === 'string' ||
       (typeof value === 'number' && isFinite(value)) ||
       typeof value === 'boolean'
     ) return value;
 
-    if (value === undefined) return undefined;
-
-    if (value instanceof firebase.firestore.Timestamp) return value.toMillis();
-    if (value instanceof Date) return value.getTime();
+    if (value instanceof firebase.firestore.Timestamp) return value;
+    if (value instanceof Date) return firebase.firestore.Timestamp.fromDate(value);
+    if (typeof value === 'number') return firebase.firestore.Timestamp.fromMillis(value);
 
     if (Array.isArray(value)) {
-      const arr = value
+      return value
         .map(v => FirebaseService.sanitizeForFirestore(v, seen))
         .filter(v => v !== undefined);
-      return arr;
     }
 
-    if (value && typeof value === 'object') {
-      if (seen.has(value)) {
-        return undefined;
-      }
+    if (typeof value === 'object') {
+      if (seen.has(value)) return undefined;
       seen.add(value);
 
       const cleaned = {};
@@ -282,104 +282,52 @@ class FirebaseService {
       }
       return Object.keys(cleaned).length ? cleaned : undefined;
     }
+    
     return undefined;
   }
 
-  // ✅ FIX ABSOLU: ID vraiment stable, déterministe, sans Date.now()
-  static stableId(msg) {
-    const str = `${msg.role || 'unknown'}_${msg.content || ''}_${msg.createdAt || 0}`;
-    
-    // Triple hash pour éviter collisions
-    let hash1 = 5381;
-    for (let i = 0; i < str.length; i++) {
-      hash1 = ((hash1 << 5) + hash1) + str.charCodeAt(i);
-    }
-    
-    let hash2 = 0;
-    for (let i = 0; i < str.length; i++) {
-      hash2 = str.charCodeAt(i) + ((hash2 << 5) - hash2);
-    }
-    
-    let hash3 = 0;
-    for (let i = str.length - 1; i >= 0; i--) {
-      hash3 = ((hash3 << 7) - hash3) + str.charCodeAt(i);
-    }
-    
-    // ✅ AUCUN Date.now() ou Math.random() !
-    return `msg_${Math.abs(hash1).toString(36)}_${Math.abs(hash2).toString(36)}_${Math.abs(hash3).toString(36)}`;
-  }
-
-  static chunk(array, size = 400) {
-    const chunks = [];
-    for (let i = 0; i < array.length; i += size) {
-      chunks.push(array.slice(i, i + size));
-    }
-    return chunks;
-  }
-
   static normalizeChat(raw, key) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      return {
+        id: key.replace(/^CHAT_/, ''),
+        title: 'Chat',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        messages: [],
+        syncedAt: 0
+      };
+    }
+
     const now = Date.now();
     
-    // ✅ FIX: Spread tout PUIS override les champs critiques
     const obj = {
       ...raw,
       id: raw.id || key.replace(/^CHAT_/, ''),
       title: raw.title || raw.name || 'Chat',
       createdAt: raw.createdAt || now,
       updatedAt: raw.updatedAt || now,
-      messages: Array.isArray(raw.messages) ? raw.messages : [],
+      messages: [],
       syncedAt: raw.syncedAt || 0
     };
 
-    obj.messages = obj.messages.map(m => ({
-      ...m,
-      createdAt: m.createdAt || m.timestamp || now,
-      updatedAt: m.updatedAt || m.timestamp || now
-    }));
+    if (Array.isArray(raw.messages)) {
+      obj.messages = raw.messages
+        .filter(m => m && typeof m === 'object' && !Array.isArray(m))
+        .map(m => ({
+          ...m,
+          createdAt: m.createdAt || m.timestamp || now,
+          updatedAt: m.updatedAt || m.timestamp || now
+        }));
+    }
 
     if (!obj.title && obj.messages.length) {
       const firstUser = obj.messages.find(m => m.role === 'user');
-      obj.title = (firstUser?.content || 'Chat').slice(0, 60);
+      if (firstUser && firstUser.content) {
+        obj.title = firstUser.content.slice(0, 60);
+      }
     }
-    return obj;
-  }
-
-  // ✅ FIX: Utiliser une Map temporaire d'assignation
-  async assignMessageIds(chatId, assignments) {
-    if (!assignments.length) return;
     
-    const idb = await this.getIndexedDB();
-    return new Promise((resolve, reject) => {
-      const tx = idb.transaction(['keyval'], 'readwrite');
-      const st = tx.objectStore('keyval');
-      const req = st.get(chatId);
-      
-      req.onsuccess = () => {
-        const data = req.result;
-        if (!data || !data.messages) {
-          resolve();
-          return;
-        }
-        
-        // Assigner par fingerprint unique
-        const assignMap = new Map(assignments.map(a => [a.fingerprint, a.id]));
-        
-        data.messages.forEach(m => {
-          if (!m.id) {
-            const fp = FirebaseService.messageFingerprint(m);
-            if (assignMap.has(fp)) {
-              m.id = assignMap.get(fp);
-            }
-          }
-        });
-        
-        const putReq = st.put(data, chatId);
-        putReq.onsuccess = () => resolve();
-        putReq.onerror = () => reject(putReq.error);
-      };
-      
-      req.onerror = () => reject(req.error);
-    });
+    return obj;
   }
 
   async flagLocalSyncedAt(chatId) {
@@ -407,99 +355,161 @@ class FirebaseService {
   }
 
   async syncChatRecord(chatId, localData) {
-    const docRef = this.db.collection('chats').doc(chatId);
-    
-    const snap = await docRef.get();
-    const remoteUp = snap.exists ? snap.data().updatedAt || 0 : 0;
-    const hasMetaChange = localData.updatedAt > remoteUp;
-
-    if (hasMetaChange) {
-      await docRef.set(
-        FirebaseService.sanitizeForFirestore({
-          title: localData.title,
-          updatedAt: Date.now(),
-          createdAt: localData.createdAt
-        }),
-        { merge: true }
-      );
+    if (this.syncLocks.has(chatId)) {
+      this.logger.log('warning', `Sync already in progress for ${chatId}`);
+      return;
     }
+    this.syncLocks.add(chatId);
 
-    const remoteSnapshot = await docRef.collection('messages')
-      .orderBy('createdAt')
-      .get();
-    
-    const remoteMessages = remoteSnapshot.docs.map(d => ({
-      id: d.id,
-      ...d.data()
-    }));
+    try {
+      const docRef = this.db.collection('chats').doc(chatId);
+      
+      const snap = await docRef.get();
+      const remoteUp = snap.exists ? snap.data().updatedAt || 0 : 0;
+      const hasMetaChange = localData.updatedAt > remoteUp;
 
-    // ✅ FIX: Map par ID avec updatedAt
-    const remoteMap = new Map(remoteMessages.map(m => [m.id, m]));
-    
-    const lastSynced = localData.syncedAt || 0;
-    const assignments = [];
-    
-    const localMsgsToUpload = (localData.messages || [])
-      .map(m => {
-        const timestamp = m.updatedAt || m.createdAt || m.timestamp || Date.now();
-        return { ...m, createdAt: timestamp, updatedAt: timestamp };
-      })
-      .filter(m => {
-        // ✅ FIX: Comparer avec updatedAt remote si existe
-        if (!m.id) return true;
+      if (hasMetaChange) {
+        await docRef.set(
+          FirebaseService.sanitizeForFirestore({
+            title: localData.title,
+            updatedAt: firebase.firestore.Timestamp.fromMillis(Date.now()),
+            createdAt: firebase.firestore.Timestamp.fromMillis(localData.createdAt)
+          }),
+          { merge: true }
+        );
+      }
+
+      const remoteSnapshot = await docRef.collection('messages')
+        .orderBy('createdAt')
+        .get();
+      
+      const remoteMessages = remoteSnapshot.docs.map(d => ({
+        id: d.id,
+        ...d.data()
+      }));
+
+      const remoteMap = new Map(remoteMessages.map(m => [m.id, m]));
+      
+      const messagesToUpload = [];
+      const localIndexToId = new Map();
+      
+      localData.messages.forEach((msg, index) => {
+        if (!msg || typeof msg !== 'object') return;
+
+        let docId;
+        let shouldUpload = false;
+
+        if (msg.id) {
+          docId = String(msg.id);
+          const remote = remoteMap.get(docId);
+          
+          if (!remote) {
+            shouldUpload = true;
+          } else {
+            const localTime = (typeof msg.updatedAt === 'number') ? msg.updatedAt : 0;
+            const remoteTime = (typeof remote.updatedAt === 'number') ? remote.updatedAt : 0;
+            shouldUpload = localTime > remoteTime;
+          }
+        } else {
+          const newDocRef = docRef.collection('messages').doc();
+          docId = newDocRef.id;
+          shouldUpload = true;
+          localIndexToId.set(index, docId);
+        }
+
+        if (shouldUpload) {
+          const msgCopy = { 
+            ...msg, 
+            id: docId, 
+            updatedAt: firebase.firestore.Timestamp.fromMillis(Date.now()),
+            createdAt: firebase.firestore.Timestamp.fromMillis(msg.createdAt || Date.now())
+          };
+          const sanitized = FirebaseService.sanitizeForFirestore(msgCopy);
+          
+          if (sanitized) {
+            messagesToUpload.push({ id: docId, data: sanitized });
+          }
+        }
+      });
+
+      if (messagesToUpload.length > 0) {
+        this.logger.log('info', `Uploading ${messagesToUpload.length} messages to ${chatId}`);
         
-        const remote = remoteMap.get(String(m.id));
-        if (!remote) return true;
-        
-        // Uploader seulement si plus récent que remote
-        return (m.updatedAt || 0) > (remote.updatedAt || 0);
-      })
-      .map(m => FirebaseService.sanitizeForFirestore({ ...m }))
-      .filter(Boolean);
-
-    this.logger.log('info', `Uploading ${localMsgsToUpload.length} messages to ${chatId}`);
-
-    for (const chunk of FirebaseService.chunk(localMsgsToUpload, 400)) {
-      const batch = this.db.batch();
-
-      for (const msg of chunk) {
-        const fingerprint = FirebaseService.messageFingerprint(msg);
-        const id = msg.id || FirebaseService.stableId(msg);
-        const needsAssignment = !msg.id;
-        
-        msg.id = id;
-
-        const mRef = docRef.collection('messages').doc(id);
-        batch.set(mRef, msg, { merge: true });
-
-        if (needsAssignment) {
-          assignments.push({ fingerprint, id });
+        const maxBatchSize = 400;
+        for (let i = 0; i < messagesToUpload.length; i += maxBatchSize) {
+          const chunk = messagesToUpload.slice(i, i + maxBatchSize);
+          const batch = this.db.batch();
+          
+          chunk.forEach(({ id, data }) => {
+            const mRef = docRef.collection('messages').doc(id);
+            batch.set(mRef, data, { merge: true });
+          });
+          
+          await batch.commit();
         }
       }
+
+      if (localIndexToId.size > 0) {
+        await this.updateLocalMessageIds(chatId, localIndexToId);
+      }
+
+      const localIds = new Set(
+        localData.messages
+          .filter(m => m && m.id)
+          .map(m => String(m.id))
+      );
       
-      await batch.commit();
+      localIndexToId.forEach(id => localIds.add(id));
+
+      const remoteMsgsToDownload = remoteMessages.filter(m => 
+        !localIds.has(m.id)
+      );
+
+      if (remoteMsgsToDownload.length > 0) {
+        this.logger.log('info', `Downloading ${remoteMsgsToDownload.length} messages from ${chatId}`);
+        await this.mergeIntoLocal(chatId, remoteMsgsToDownload);
+      }
+
+      await this.flagLocalSyncedAt(chatId);
+      
+    } catch (error) {
+      this.logger.log('error', `syncChatRecord failed for ${chatId}`, error);
+      throw error;
+    } finally {
+      this.syncLocks.delete(chatId);
     }
+  }
 
-    if (assignments.length > 0) {
-      await this.assignMessageIds(chatId, assignments);
-    }
-
-    const localIds = new Set(
-      (localData.messages || [])
-        .filter(m => m.id)
-        .map(m => String(m.id))
-    );
-
-    const remoteMsgsToDownload = remoteMessages.filter(m => 
-      !localIds.has(m.id)
-    );
-
-    if (remoteMsgsToDownload.length > 0) {
-      this.logger.log('info', `Downloading ${remoteMsgsToDownload.length} messages from ${chatId}`);
-      await this.mergeIntoLocal(chatId, remoteMsgsToDownload);
-    }
-
-    await this.flagLocalSyncedAt(chatId);
+  async updateLocalMessageIds(chatId, indexToIdMap) {
+    const idb = await this.getIndexedDB();
+    return new Promise((resolve, reject) => {
+      const tx = idb.transaction(['keyval'], 'readwrite');
+      const st = tx.objectStore('keyval');
+      const req = st.get(chatId);
+      
+      req.onsuccess = () => {
+        const data = req.result;
+        if (!data || !Array.isArray(data.messages)) {
+          resolve();
+          return;
+        }
+        
+        indexToIdMap.forEach((id, index) => {
+          if (data.messages[index] && !data.messages[index].id) {
+            data.messages[index].id = id;
+            data.messages[index].updatedAt = Date.now();
+          }
+        });
+        
+        data.updatedAt = Date.now();
+        
+        const putReq = st.put(data, chatId);
+        putReq.onsuccess = () => resolve();
+        putReq.onerror = () => reject(putReq.error);
+      };
+      
+      req.onerror = () => reject(req.error);
+    });
   }
 
   attachListener(chatId) {
@@ -512,12 +522,46 @@ class FirebaseService {
       return;
     }
 
-    // ✅ PAS de limit, mais avec where sur updatedAt récent
-    const cutoff = Date.now() - (30 * 24 * 60 * 60 * 1000);  // 30 jours
-    
+    let lastVisible = null;
+    const pageSize = 50;
+
+    const loadPage = async () => {
+      let query = this.db
+        .collection('chats').doc(chatId).collection('messages')
+        .orderBy('createdAt', 'desc')
+        .limit(pageSize);
+
+      if (lastVisible) {
+        query = query.startAfter(lastVisible);
+      }
+
+      const snapshot = await query.get();
+      
+      if (!snapshot.empty) {
+        lastVisible = snapshot.docs[snapshot.docs.length - 1];
+        
+        const messages = snapshot.docs.map(d => ({
+          id: d.id,
+          ...d.data()
+        }));
+        
+        await this.mergeIntoLocal(chatId, messages);
+      }
+
+      return snapshot.size === pageSize;
+    };
+
+    (async () => {
+      let hasMore = true;
+      while (hasMore) {
+        hasMore = await loadPage();
+      }
+    })();
+
     const unsubscribe = this.db
       .collection('chats').doc(chatId).collection('messages')
-      .where('updatedAt', '>', cutoff)
+      .orderBy('createdAt', 'desc')
+      .limit(100)
       .onSnapshot(snap => {
         if (!snap.docChanges().length || this.isSyncing) return;
         
@@ -550,119 +594,159 @@ class FirebaseService {
     this.logger.log('info', `Listener attached for ${chatId}`);
   }
 
-  // ✅ FIX: Queue avec Promise au lieu de busy-wait
   async mergeIntoLocal(chatId, msgs) {
-    // Si une merge est en cours, attendre qu'elle finisse
-    if (this.mergeQueue.has(chatId)) {
-      await this.mergeQueue.get(chatId);
+    if (!msgs || msgs.length === 0) return;
+
+    if (!this.mergeLocks.has(chatId)) {
+      this.mergeLocks.set(chatId, {
+        locked: false,
+        queue: []
+      });
     }
-    
-    // Créer une nouvelle Promise pour cette merge
-    let resolveQueue;
-    const queuePromise = new Promise(r => { resolveQueue = r; });
-    this.mergeQueue.set(chatId, queuePromise);
+
+    const lockInfo = this.mergeLocks.get(chatId);
+
+    if (lockInfo.locked) {
+      return new Promise((resolve, reject) => {
+        lockInfo.queue.push({ msgs, resolve, reject });
+      });
+    }
+
+    lockInfo.locked = true;
 
     try {
-      const idb = await this.getIndexedDB();
+      await this._performMerge(chatId, msgs);
       
-      return await new Promise((resolve, reject) => {
-        const tx = idb.transaction(['keyval'], 'readwrite');
-        
-        // ✅ FIX: Timeout adaptatif (100ms par message, min 5s, max 30s)
-        const timeoutMs = Math.max(5000, Math.min(30000, msgs.length * 100));
-        const txTimeout = setTimeout(() => {
-          tx.abort();
+      while (lockInfo.queue.length > 0) {
+        const next = lockInfo.queue.shift();
+        try {
+          await this._performMerge(chatId, next.msgs);
+          next.resolve();
+        } catch (e) {
+          next.reject(e);
+        }
+      }
+      
+    } finally {
+      lockInfo.locked = false;
+    }
+  }
+
+  async _performMerge(chatId, msgs) {
+    const idb = await this.getIndexedDB();
+    
+    return new Promise((resolve, reject) => {
+      const tx = idb.transaction(['keyval'], 'readwrite');
+      
+      let timeoutHandle;
+      const setupTimeout = () => {
+        timeoutHandle = setTimeout(() => {
+          try {
+            tx.abort();
+          } catch {}
           reject(new Error('Transaction timeout'));
-        }, timeoutMs);
+        }, 5000);
+      };
+      
+      setupTimeout();
+      
+      const clearTimer = () => {
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+          timeoutHandle = null;
+        }
+      };
+      
+      tx.oncomplete = () => {
+        clearTimer();
+        resolve();
+      };
+      
+      tx.onerror = () => {
+        clearTimer();
+        reject(tx.error);
+      };
+      
+      tx.onabort = () => {
+        clearTimer();
+        reject(new Error('Transaction aborted'));
+      };
+      
+      const st = tx.objectStore('keyval');
+      const req = st.get(chatId);
+      
+      req.onsuccess = () => {
+        const chat = req.result || { 
+          id: chatId.replace(/^CHAT_/, ''),
+          messages: [], 
+          updatedAt: 0 
+        };
         
-        const st = tx.objectStore('keyval');
-        const req = st.get(chatId);
+        if (!Array.isArray(chat.messages)) {
+          chat.messages = [];
+        }
         
-        req.onsuccess = () => {
-          clearTimeout(txTimeout);
-          
-          const chat = req.result || { 
-            id: chatId.replace(/^CHAT_/, ''),
-            messages: [], 
-            updatedAt: 0 
-          };
-          
-          const existingById = new Map(
-            chat.messages.filter(m => m.id).map(m => [m.id, m])
-          );
-          
-          const existingByFingerprint = new Map(
-            chat.messages.map(m => {
-              const fp = FirebaseService.messageFingerprint(m);
-              return [fp, m];
-            })
-          );
-          
-          let addedCount = 0;
-          let updatedCount = 0;
-          
-          msgs.forEach(m => {
-            if (m.id && existingById.has(m.id)) {
-              const existing = existingById.get(m.id);
-              if ((m.updatedAt || 0) > (existing.updatedAt || 0)) {
-                Object.assign(existing, m);
-                updatedCount++;
-              }
-              return;
+        const existingById = new Map(
+          chat.messages.filter(m => m && m.id).map(m => [m.id, m])
+        );
+        
+        let addedCount = 0;
+        let updatedCount = 0;
+        
+        msgs.forEach(m => {
+          if (!m || typeof m !== 'object' || !m.id) return;
+
+          if (existingById.has(m.id)) {
+            const existing = existingById.get(m.id);
+            const localTime = (typeof existing.updatedAt === 'number') ? existing.updatedAt : 0;
+            const remoteTime = (typeof m.updatedAt === 'number') ? m.updatedAt : 0;
+            
+            if (remoteTime > localTime) {
+              Object.assign(existing, m);
+              updatedCount++;
             }
-            
-            const fp = FirebaseService.messageFingerprint(m);
-            
-            if (existingByFingerprint.has(fp)) {
-              const existing = existingByFingerprint.get(fp);
-              if (m.id && !existing.id) {
-                existing.id = m.id;
-                updatedCount++;
-              }
-              return;
-            }
-            
+          } else {
             chat.messages.push(m);
             addedCount++;
-          });
+          }
+        });
 
-          chat.messages.sort((a, b) => {
-            const timeDiff = (a.createdAt || 0) - (b.createdAt || 0);
-            if (timeDiff !== 0) return timeDiff;
-            return (a.id || '').localeCompare(b.id || '');
-          });
-          
-          const seen = new Set();
-          chat.messages = chat.messages.filter(m => {
-            if (m.id && seen.has(m.id)) return false;
-            if (m.id) seen.add(m.id);
-            return true;
-          });
-
-          chat.updatedAt = Date.now();
-          
-          const putReq = st.put(chat, chatId);
-          putReq.onsuccess = () => {
-            if (addedCount > 0 || updatedCount > 0) {
-              this.logger.log('info', `Merged into ${chatId}: +${addedCount} new, ~${updatedCount} updated`);
-            }
-            resolve();
-          };
-          putReq.onerror = () => {
-            clearTimeout(txTimeout);
-            reject(putReq.error);
-          };
-        };
+        chat.messages.sort((a, b) => {
+          const aTime = (typeof a.createdAt === 'number') ? a.createdAt : 0;
+          const bTime = (typeof b.createdAt === 'number') ? b.createdAt : 0;
+          if (aTime !== bTime) return aTime - bTime;
+          const aId = a.id || '';
+          const bId = b.id || '';
+          return aId.localeCompare(bId);
+        });
         
-        req.onerror = () => {
-          clearTimeout(txTimeout);
-          reject(req.error);
+        const seen = new Set();
+        chat.messages = chat.messages.filter(m => {
+          if (!m || !m.id) return false;
+          if (seen.has(m.id)) return false;
+          seen.add(m.id);
+          return true;
+        });
+
+        chat.updatedAt = Date.now();
+        
+        const putReq = st.put(chat, chatId);
+        putReq.onsuccess = () => {
+          if (addedCount > 0 || updatedCount > 0) {
+            this.logger.log('info', `Merged into ${chatId}: +${addedCount} new, ~${updatedCount} updated`);
+          }
         };
-      });
-    } finally {
-      this.mergeQueue.delete(chatId);
-      resolveQueue();
-    }
+        putReq.onerror = () => {
+          clearTimer();
+          reject(putReq.error);
+        };
+      };
+      
+      req.onerror = () => {
+        clearTimer();
+        reject(req.error);
+      };
+    });
   }
 
   async removeFromLocal(chatId, msgIds) {
@@ -680,9 +764,16 @@ class FirebaseService {
           return;
         }
         
+        if (!Array.isArray(chat.messages)) {
+          resolve();
+          return;
+        }
+        
         const idsToRemove = new Set(msgIds);
         const before = chat.messages.length;
-        chat.messages = chat.messages.filter(m => !idsToRemove.has(m.id));
+        chat.messages = chat.messages.filter(m => 
+          m && (!m.id || !idsToRemove.has(m.id))
+        );
         const removed = before - chat.messages.length;
         
         if (removed > 0) {
@@ -702,45 +793,19 @@ class FirebaseService {
     });
   }
 
-  // ✅ FIX: Fingerprint avec counter pour messages vides identiques
-  static messageFingerprint(msg) {
-    const content = (msg.content || '').trim();
-    const role = msg.role || 'unknown';
-    const timestamp = msg.createdAt || 0;
-    
-    if (!content) {
-      if (msg.id) return `empty_withid_${msg.id}`;
-      // ✅ Utiliser timestamp + role + un hash du message complet
-      const msgStr = JSON.stringify(msg);
-      let hash = 5381;
-      for (let i = 0; i < msgStr.length; i++) {
-        hash = ((hash << 5) + hash) + msgStr.charCodeAt(i);
-      }
-      return `empty_${role}_${timestamp}_${Math.abs(hash).toString(36)}`;
-    }
-    
-    const str = `${role}::${content}::${timestamp}`;
-    let hash = 5381;
-    for (let i = 0; i < str.length; i++) {
-      hash = ((hash << 5) + hash) + str.charCodeAt(i);
-    }
-    
-    let hash2 = 0;
-    for (let i = 0; i < str.length; i++) {
-      hash2 = str.charCodeAt(i) + ((hash2 << 5) - hash2);
-    }
-    
-    return `${Math.abs(hash).toString(36)}_${Math.abs(hash2).toString(36)}`;
-  }
-
   async getIndexedDB() {
-    // ✅ FIX: Tester avec readyState au lieu de transaction
-    if (this.dbInstance && this.dbInstance.readyState !== 'closed') {
-      return this.dbInstance;
+    if (this.dbInstance) {
+      try {
+        const tx = this.dbInstance.transaction(['keyval'], 'readonly');
+        tx.abort();
+        return this.dbInstance;
+      } catch (e) {
+        this.dbInstance = null;
+      }
     }
 
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open('keyval-store');
+      const request = indexedDB.open('keyval-store', 1);
       
       request.onsuccess = () => {
         this.dbInstance = request.result;
@@ -748,12 +813,10 @@ class FirebaseService {
         this.dbInstance.onversionchange = () => {
           this.dbInstance.close();
           this.dbInstance = null;
-          this.logger.log('warning', 'IndexedDB version changed, closed');
         };
         
         this.dbInstance.onclose = () => {
           this.dbInstance = null;
-          this.logger.log('warning', 'IndexedDB closed');
         };
         
         resolve(request.result);
@@ -765,6 +828,13 @@ class FirebaseService {
       
       request.onblocked = () => {
         this.logger.log('warning', 'IndexedDB blocked');
+      };
+      
+      request.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains('keyval')) {
+          db.createObjectStore('keyval');
+        }
       };
     });
   }
@@ -780,33 +850,43 @@ class FirebaseService {
       this.firebase = new FirebaseService(this.config, this.logger);
       this.autoSyncInterval = null;
       this.modalCleanupCallbacks = [];
-      this.lastSyncTime = 0;  // ✅ FIX: Debounce auto-sync
+      this.lastSyncTime = null;
     }
     
     async initialize() {
-      this.logger.log('start', 'Initializing Firebase Sync');
+      this.logger.log('start', 'Initializing Firebase Sync v2.4');
       await this.waitForDOM();
       this.insertSyncButton();
 
       if (this.config.isConfigured()) {
         try {
           await this.firebase.initialize();
-          await this.firebase.pushLocalChats();
           
-          const idb = await this.firebase.getIndexedDB();
-          const tx = idb.transaction(['keyval'], 'readonly');
-          const store = tx.objectStore('keyval');
+          try {
+            await this.firebase.pushLocalChats();
+            this.lastSyncTime = Date.now();
+          } catch (e) {
+            this.logger.log('error', 'Initial sync failed', e);
+          }
           
-          await new Promise((resolve) => {
-            store.getAllKeys().onsuccess = (e) => {
-              const keys = e.target.result.filter(k => 
-                typeof k === 'string' && k.startsWith('CHAT_')
-              );
-              this.logger.log('info', `Attaching listeners to ${keys.length} chats`);
-              keys.forEach(chatId => this.firebase.attachListener(chatId));
-              resolve();
-            };
-          });
+          try {
+            const idb = await this.firebase.getIndexedDB();
+            const tx = idb.transaction(['keyval'], 'readonly');
+            const store = tx.objectStore('keyval');
+            
+            await new Promise((resolve) => {
+              store.getAllKeys().onsuccess = (e) => {
+                const keys = e.target.result.filter(k => 
+                  typeof k === 'string' && k.startsWith('CHAT_')
+                );
+                this.logger.log('info', `Attaching listeners to ${keys.length} chats`);
+                keys.forEach(chatId => this.firebase.attachListener(chatId));
+                resolve();
+              };
+            });
+          } catch (e) {
+            this.logger.log('error', 'Failed to attach listeners', e);
+          }
           
           this.startAutoSync();
           this.updateSyncStatus('success');
@@ -870,7 +950,6 @@ class FirebaseService {
     
     openSyncModal() {
       if (document.querySelector('.cloud-sync-modal')) return;
-      this.logger.log('start', 'Opening sync modal');
       this.createModal();
     }
     
@@ -934,7 +1013,7 @@ class FirebaseService {
           <div id="action-msg" class="text-center text-zinc-400 mt-3"></div>
           
           <div class="text-center mt-4 pt-3 text-xs text-zinc-500 border-t border-zinc-700">
-            <span>Firebase Cloud Sync v1.2 for TypingMind</span>
+            <span>Firebase Cloud Sync v2.4 STABLE for TypingMind</span>
           </div>
         </div>`;
     }
@@ -1052,21 +1131,21 @@ class FirebaseService {
       }
     }
     
-    // ✅ FIX: Debounce auto-sync
     startAutoSync() {
       if (this.autoSyncInterval) clearInterval(this.autoSyncInterval);
       const interval = Math.max(this.config.get('syncInterval') * 1000, 15000);
       
       this.autoSyncInterval = setInterval(async () => {
-        // Skip si sync en cours ou dernière sync trop récente
-        const timeSinceLastSync = Date.now() - this.lastSyncTime;
-        if (this.firebase.isSyncing || timeSinceLastSync < interval) {
-          this.logger.log('info', 'Auto-sync skipped (too soon or in progress)');
-          return;
+        if (this.firebase.isSyncing) return;
+        
+        if (this.lastSyncTime) {
+          const timeSinceLastSync = Date.now() - this.lastSyncTime;
+          if (timeSinceLastSync < interval) return;
         }
         
         this.logger.log('info', 'Auto-sync triggered');
         this.updateSyncStatus('syncing');
+        
         try {
           await this.firebase.pushLocalChats();
           this.updateSyncStatus('success');
