@@ -128,48 +128,30 @@ class FirebaseService {
   }
 
   async initialize() {
+    await this.loadSDK();                 
 
-    if (this.app && !this.db) {
-      firebase.firestore().settings({
-        experimentalForceLongPolling: true,
-        useFetchStreams: false
-      });
-      this.db      = firebase.firestore(this.app);
-      this.storage = firebase.storage(this.app);
-      console.log('init ok (db recreated)');
-      return;
-    }
-
-    if (this.app) return;            
-
-    try {
-      await this.loadSDK();          
-
+    if (!this.app) {
       const cfg = {
         apiKey       : this.config.get('apiKey'),
         authDomain   : this.config.get('authDomain'),
         projectId    : this.config.get('projectId'),
         storageBucket: this.config.get('storageBucket')
       };
-
       this.app = firebase.initializeApp(cfg, 'tm-sync');
-
-      firebase.firestore().settings({
-        experimentalForceLongPolling: true,
-        useFetchStreams            : false
-      });
-
-      this.db      = firebase.firestore(this.app);
-      this.storage = firebase.storage(this.app);
-
-      try { await this.db.enablePersistence(); } catch {}
-
-      console.log('init ok');       
-      this.logger.log('success', 'Firebase initialized');
-    } catch (e) {
-      this.logger.log('error', 'initialize failed', e);
-      throw e;                       
     }
+
+    firebase.firestore().settings({
+      experimentalForceLongPolling: true,
+      useFetchStreams            : false
+    });
+
+    this.db      = firebase.firestore(this.app);
+    this.storage = firebase.storage(this.app);
+
+    try { await this.db.enablePersistence(); } catch {}
+
+    console.log('init ok');               
+    this.logger.log('success', 'Firebase initialised');
   }
 
   async pushLocalChats() {
