@@ -161,6 +161,11 @@ class FirebaseService {
   }
 
   async pushLocalChats() {
+    if (!this.db) {
+      this.logger.log('error', 'pushLocalChats called but this.db is null');
+      throw new Error('Firebase not initialized');
+    }
+
     const idb = await this.getIndexedDB();
     const store = idb.transaction(['keyval'], 'readonly').objectStore('keyval');
     
@@ -188,6 +193,11 @@ class FirebaseService {
   }
 
   attachListener(chatId) {
+    if (!this.db) {
+      this.logger.log('error', `attachListener(${chatId}) called but this.db is null`);
+      return;
+    }
+
     if (this.listeners.includes(chatId)) return;
     
     this.db.collection('chats').doc(chatId).collection('messages')
@@ -470,7 +480,38 @@ class FirebaseService {
         actionMsg.style.color = '#22c55e';
         this.updateSyncStatus('success');
       } catch (e) {
-        actionMsg.textContent = `❌ Sync failed: ${e.message}`;
+        actionMsg.textContent = `❌ Sync failed: ${e.message}`;async pushLocalChats() {
+  /* GARDE : refuse de continuer si db non initialisé */
+  if (!this.db) {
+    this.logger.log('error', 'pushLocalChats called but this.db is null');
+    throw new Error('Firebase not initialized');
+  }
+
+  const idb = await this.getIndexedDB();
+  const store = idb.transaction(['keyval'], 'readonly').objectStore('keyval');
+  
+  return new Promise(done => {
+    store.openCursor().onsuccess = async e => {
+      const cur = e.target.result;
+      if (!cur) { done(); return; }
+      
+      const k = cur.key;
+      if (typeof k === 'string' && k.startsWith('CHAT_')) {
+        const docRef = this.db.collection('chats').doc(k);
+        const snap = await docRef.get();
+        const remoteUp = snap.exists ? snap.data().updatedAt || 0 : 0;
+        
+        if (cur.value.updatedAt > remoteUp) {
+          await docRef.set({ ...cur.value, updatedAt: Date.now() });
+          this.logger.log('success', `Pushed ${k}`);
+        }
+        
+        this.attachListener(k);
+      }
+      cur.continue();
+    };
+  });
+}
         actionMsg.style.color = '#ef4444';
         this.updateSyncStatus('error');
       } finally {
