@@ -147,13 +147,14 @@ class FirebaseService {
     });
   }
 
-  loadScript(src) {
+  loadScript(src, attrs = {}) {
     return new Promise((ok, err) => {
       const s = document.createElement('script');
       s.src   = src;
       s.async = true;
-      s.onload= ok;
-      s.onerror = () => err(new Error(`fail ${src}`));
+      Object.entries(attrs).forEach(([k, v]) => s.setAttribute(k, v));
+      s.onload  = ok;
+      s.onerror = () => err(new Error(`Échec chargement ${src}`));
       document.head.appendChild(s);
     });
   }
@@ -308,6 +309,11 @@ class FirebaseService {
       syncedAt  : raw.syncedAt  || 0
     };
 
+    obj.messages = obj.messages.map(m => ({
+      ...m,
+      createdAt: m.createdAt || m.timestamp || now,
+      updatedAt: m.updatedAt || m.timestamp || now
+    }));
 
     if (!obj.title && obj.messages.length) {
       const firstUser = obj.messages.find(m => m.role === 'user');
@@ -363,10 +369,22 @@ class FirebaseService {
       );
     }
 
+    const remoteSnapshot = await docRef.collection('messages').get();
+    const remoteIds = new Set(remoteSnapshot.docs.map(d => d.id));
     const deltaMsgs = (localData.messages || [])
-      .filter(m => (m.updatedAt || m.createdAt || 0) > lastSynced)
+      .map(m => {
+        const timestamp = m.updatedAt || m.createdAt || m.timestamp || Date.now();
+        return { ...m, createdAt: timestamp, updatedAt: timestamp };
+      })
+      .filter(m => {
+        if (!m.id) return true;
+        if (!remoteIds.has(String(m.id))) return true;
+        return (m.updatedAt || 0) > lastSynced;
+      })
       .map(m => FirebaseService.sanitizeForFirestore({ ...m }))
       .filter(Boolean);
+
+    this.logger.log('info', `Syncing ${deltaMsgs.length} messages for ${chatId}`);
 
     for (const chunk of FirebaseService.chunk(deltaMsgs, 400)) {
       const batch = this.db.batch();
@@ -384,9 +402,9 @@ class FirebaseService {
       await batch.commit();
     }
 
-    await this.flagLocalSyncedAt(chatId);   
-    this.attachListener(chatId);
-  }
+  await this.flagLocalSyncedAt(chatId);
+  this.attachListener(chatId);
+}
 
   attachListener(chatId) {
     if (!this.db) {
