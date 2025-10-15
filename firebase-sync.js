@@ -184,13 +184,34 @@ class FirebaseService {
     });
   }
 
+  static stripUndefined(value) {
+    if (value === undefined) return undefined;
+    if (Array.isArray(value)) {
+      return value
+        .map(FirebaseService.stripUndefined)
+        .filter(v => v !== undefined);
+    }
+    if (value && typeof value === 'object') {
+      const cleaned = {};
+      for (const [k, v] of Object.entries(value)) {
+        const cv = FirebaseService.stripUndefined(v);
+        if (cv !== undefined) cleaned[k] = cv;
+      }
+      return cleaned;
+    }
+    return value;
+  }
+
+
   async syncChatRecord(chatId, localData) {
     const docRef   = this.db.collection('chats').doc(chatId);
     const snap     = await docRef.get();
     const remoteUp = snap.exists ? snap.data().updatedAt || 0 : 0;
 
     if (localData.updatedAt > remoteUp) {
-      await docRef.set({ ...localData, updatedAt: Date.now() });
+      const clean = FirebaseService.stripUndefined(localData);  
+      clean.updatedAt = Date.now();
+      await docRef.set(clean);
       this.logger.log('success', `Pushed ${chatId}`);
     }
     this.attachListener(chatId);
