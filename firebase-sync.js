@@ -115,19 +115,17 @@ class FirebaseService {
       return;
     }
 
-    const SRC        = 'https://cdnjs.cloudflare.com/ajax/libs/firebase/9.22.2/firebase-compat.min.js';
-    const INTEGRITY  = 'sha512-p+e6X0BVRhyRb0Zsx0ucia4j8y7ZqdGm9cGxPV1XgxJ+0LqIo0H5P8zkKXee5wM9n7StzqJVX2qRucyaRt12Ww=='; 
+    const SRC = 'https://unpkg.com/firebase@9.22.2/firebase-compat.js';
 
     await this.loadScript(SRC, {
       id: 'firebase-compat',
-      integrity: INTEGRITY,
       crossOrigin: 'anonymous'
     });
 
     await this.waitForFirebaseGlobal();
 
     this.sdkLoaded = true;
-    this.logger.log('success', 'Firebase SDK 9.22.2 chargé (CDN + cache)');
+    this.logger.log('success', 'Firebase SDK 9.22.2 chargé via unpkg');
   }
 
   waitForFirebaseGlobal() {
