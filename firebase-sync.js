@@ -98,31 +98,36 @@ class FirebaseService {
     this.sdkLoaded = false;
   }
 
-  async loadSDK() {
+  async loadSDK () {
     if (this.sdkLoaded) return;
 
-    const URL_COMPAT =
+    const CDN_URL =
       'https://cdnjs.cloudflare.com/ajax/libs/firebase/9.24.0/firebase-compat.min.js';
 
-    await this.loadScript(URL_COMPAT);   
+    const code = await fetch(CDN_URL, { cache: 'no-store' })
+                        .then(r => {
+                          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                          return r.text();
+                        });
 
-    if (!window.firebase) {
-      throw new Error('firebase global missing after load');
-    }
+    const blobURL = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+    await this.loadScript(blobURL);
+    URL.revokeObjectURL(blobURL);
+
+    if (!window.firebase)
+      throw new Error('firebase global missing after blob eval');
 
     this.sdkLoaded = true;
-    this.logger.log('success', 'Firebase compat bundle loaded');
+    this.logger.log('success', 'Firebase SDK loaded via blob');
   }
 
-  loadScript(src) {
+  loadScript (src) {
     return new Promise((ok, err) => {
-      if (document.querySelector(`script[data-fb="${src}"]`)) { ok(); return; }
       const s = document.createElement('script');
-      s.setAttribute('data-fb', src);
       s.src = src;
       s.async = true;
       s.onload = ok;
-      s.onerror = () => err(new Error(`Failed to load ${src}`));
+      s.onerror = () => err(new Error(`failed ${src}`));
       document.head.appendChild(s);
     });
   }
