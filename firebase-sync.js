@@ -140,12 +140,11 @@ class FirebaseService {
       this.app = firebase.initializeApp(cfg, 'tm-sync');
     }
 
-    firebase.firestore().settings({
+    this.db      = firebase.firestore(this.app);     
+    this.db.settings({                                
       experimentalForceLongPolling: true,
       useFetchStreams            : false
     });
-
-    this.db      = firebase.firestore(this.app);
     this.storage = firebase.storage(this.app);
 
     try { await this.db.enablePersistence(); } catch {}
