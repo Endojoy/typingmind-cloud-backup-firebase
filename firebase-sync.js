@@ -128,28 +128,36 @@ class FirebaseService {
   }
 
   async initialize() {
-    if (this.app) return;          
-    await this.loadSDK();          
+    if (this.app) return;            
 
-    const cfg = {
-      apiKey       : this.config.get('apiKey'),
-      authDomain   : this.config.get('authDomain'),
-      projectId    : this.config.get('projectId'),
-      storageBucket: this.config.get('storageBucket')
-    };
+    try {
+      await this.loadSDK();          
 
-    this.app = firebase.initializeApp(cfg, 'tm-sync');  
-    firebase.firestore().settings({                      
-      experimentalForceLongPolling: true,
-      useFetchStreams: false
-    });
-    this.db      = firebase.firestore(this.app);
-    console.log('init ok')
-    this.storage = firebase.storage(this.app);
+      const cfg = {
+        apiKey       : this.config.get('apiKey'),
+        authDomain   : this.config.get('authDomain'),
+        projectId    : this.config.get('projectId'),
+        storageBucket: this.config.get('storageBucket')
+      };
 
+      this.app = firebase.initializeApp(cfg, 'tm-sync');
 
-    try { await this.db.enablePersistence(); } catch {}
-    this.logger.log('success', 'Firebase initialized');
+      firebase.firestore().settings({
+        experimentalForceLongPolling: true,
+        useFetchStreams            : false
+      });
+
+      this.db      = firebase.firestore(this.app);
+      this.storage = firebase.storage(this.app);
+
+      try { await this.db.enablePersistence(); } catch {}
+
+      console.log('init ok');       
+      this.logger.log('success', 'Firebase initialized');
+    } catch (e) {
+      this.logger.log('error', 'initialize failed', e);
+      throw e;                       
+    }
   }
 
   async pushLocalChats() {
@@ -237,14 +245,16 @@ class FirebaseService {
       this.logger.log('start', 'Initializing Firebase Sync');
       await this.waitForDOM();
       this.insertSyncButton();
+
       if (this.config.isConfigured()) {
         try {
-          await this.firebase.initialize();
-          await this.firebase.pushLocalChats();
+          await this.firebase.initialize();          
+          console.log('init ok');                    
+          await this.firebase.pushLocalChats();      
           this.startAutoSync();
           this.updateSyncStatus('success');
         } catch (e) {
-          this.logger.log('error', 'Init failed', e.message);
+          this.logger.log('error', 'Init failed', e);
           this.updateSyncStatus('error');
         }
       } else {
