@@ -98,16 +98,64 @@ class FirebaseService {
     this.sdkLoaded = false;
   }
 
-  async loadSDK() {
+  async loadSDK () {
     if (this.sdkLoaded) return;
 
-    const base = 'https://cdn.jsdelivr.net/npm/firebase@9.24.0/';
-    await this.loadScript(base + 'firebase-app-compat.js');
-    await this.loadScript(base + 'firebase-firestore-compat.js');
-    await this.loadScript(base + 'firebase-storage-compat.js');
+    const sources = [
+      'https://www.gstatic.com/firebasejs/9.24.0/firebase-app-compat.js',
+      'https://www.gstatic.com/firebasejs/9.24.0/firebase-firestore-compat.js',
+      'https://www.gstatic.com/firebasejs/9.24.0/firebase-storage-compat.js'
+    ];
+    const fallbacks = (url) => [
+      url.replace('www.gstatic.com/firebasejs','cdn.jsdelivr.net/npm/firebase@9.24.0'),
+      url.replace('www.gstatic.com/firebasejs','https://unpkg.com/firebase@9.24.0')
+    ];
 
+    for (const url of sources) {
+      const ok = await this.tryLoad(url, fallbacks(url));
+      if (!ok) throw new Error(`Failed to load ${url}`);
+    }
     this.sdkLoaded = true;
-    this.logger.log('success', 'Firebase SDK (jsDelivr) loaded');
+    this.logger.log('success', 'Firebase SDK loaded (fallback-safe)');
+  }
+
+
+  async tryLoad (mainUrl, altUrls) {
+    const urls = [mainUrl, ...altUrls];
+
+    for (const url of urls) {
+      try {
+        await this.loadScript(url);
+        return true;                     
+      } catch (e) {
+        this.logger.log('warning', `CDN failed ${url}`);
+      }
+    }
+
+    try {
+      const res = await fetch(mainUrl, { cache:'reload' });
+      if (!res.ok) throw new Error('fetch failed');
+      const txt = await res.text();
+      const blobURL = URL.createObjectURL(new Blob([txt],{type:'text/javascript'}));
+      await this.loadScript(blobURL);
+      URL.revokeObjectURL(blobURL);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  loadScript (src) {
+    return new Promise((resolve, reject) => {
+      if (document.querySelector(`script[data-fb="${src}"]`)) { resolve(); return; }
+      const s = document.createElement('script');
+      s.setAttribute('data-fb', src);
+      s.src     = src;
+      s.async   = true;
+      s.onload  = () => resolve();
+      s.onerror = () => reject();
+      document.head.appendChild(s);
+    });
   }
 
   loadScript(src) {
