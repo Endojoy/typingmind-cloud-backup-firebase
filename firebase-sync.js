@@ -100,9 +100,8 @@ class FirebaseService {
 
   async loadSDK () {
     if (this.sdkLoaded) return;
-
     const CDN_URL =
-      'https://cdnjs.cloudflare.com/ajax/libs/firebase/9.24.0/firebase-compat.min.js';
+      'https://cdnjs.cloudflare.com/ajax/libs/firebase/9.22.2/firebase-compat.min.js';
 
     const code = await fetch(CDN_URL, { cache: 'no-store' })
                         .then(r => {
@@ -110,7 +109,8 @@ class FirebaseService {
                           return r.text();
                         });
 
-    const blobURL = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+    const blobURL = URL.createObjectURL(
+          new Blob([code], { type: 'text/javascript' }));
     await this.loadScript(blobURL);
     URL.revokeObjectURL(blobURL);
 
@@ -118,7 +118,7 @@ class FirebaseService {
       throw new Error('firebase global missing after blob eval');
 
     this.sdkLoaded = true;
-    this.logger.log('success', 'Firebase SDK loaded via blob');
+    this.logger.log('success', 'Firebase SDK 9.22.2 loaded via blob');
   }
 
   loadScript (src) {
