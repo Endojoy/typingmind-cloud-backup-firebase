@@ -210,21 +210,31 @@ class FirebaseService {
 
     if (localData.updatedAt > remoteUp) {
       await docRef.set(
-        { updatedAt: Date.now(),  },
+        { updatedAt: Date.now() },
         { merge: true }
       );
     }
 
-    const batch = this.db.batch();
+    const batch     = this.db.batch();
     const cleanMsgs = (localData.messages || []).map(FirebaseService.stripUndefined);
 
+    let autoIndex = 0;                              
+
     for (const msg of cleanMsgs) {
-      const mRef = docRef.collection('messages').doc(msg.id.toString());
-      batch.set(mRef, msg, { merge: true });    
+      const id = (msg && msg.id != null && msg.id !== '')
+        ? String(msg.id)
+        : `m_${Date.now()}_${autoIndex++}`;
+
+      const msgForSave = { ...msg, id };
+
+      const mRef = docRef.collection('messages').doc(id);
+      batch.set(mRef, msgForSave, { merge: true });
     }
+
     if (cleanMsgs.length) await batch.commit();
 
-    this.logger.log('success', `Pushed ${chatId} (${cleanMsgs.length} msgs)`);
+    this.logger.log('success',
+      `Pushed ${chatId} (${cleanMsgs.length} msgs, ${autoIndex} auto-id)`);
     this.attachListener(chatId);
   }
 
