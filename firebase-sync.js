@@ -162,30 +162,39 @@ class FirebaseService {
       throw new Error('Firebase not initialized');
     }
 
-    const idb = await this.getIndexedDB();
-    const store = idb.transaction(['keyval'], 'readonly').objectStore('keyval');
-    
-    return new Promise(done => {
-      store.openCursor().onsuccess = async e => {
+    const idb    = await this.getIndexedDB();
+    const tx     = idb.transaction(['keyval'], 'readonly');
+    const store  = tx.objectStore('keyval');
+    const jobs   = [];                      
+
+    return new Promise((resolve, reject) => {
+      store.openCursor().onsuccess = e => {
         const cur = e.target.result;
-        if (!cur) { done(); return; }
-        
+        if (!cur) {                        
+          Promise.all(jobs).then(resolve).catch(reject);
+          return;
+        }
+
         const k = cur.key;
         if (typeof k === 'string' && k.startsWith('CHAT_')) {
-          const docRef = this.db.collection('chats').doc(k);
-          const snap = await docRef.get();
-          const remoteUp = snap.exists ? snap.data().updatedAt || 0 : 0;
-          
-          if (cur.value.updatedAt > remoteUp) {
-            await docRef.set({ ...cur.value, updatedAt: Date.now() });
-            this.logger.log('success', `Pushed ${k}`);
-          }
-          
-          this.attachListener(k);
+          jobs.push(this.syncChatRecord(k, cur.value));
         }
-        cur.continue();
+        cur.continue();                   
       };
+      store.openCursor().onerror = reject;
     });
+  }
+
+  async syncChatRecord(chatId, localData) {
+    const docRef   = this.db.collection('chats').doc(chatId);
+    const snap     = await docRef.get();
+    const remoteUp = snap.exists ? snap.data().updatedAt || 0 : 0;
+
+    if (localData.updatedAt > remoteUp) {
+      await docRef.set({ ...localData, updatedAt: Date.now() });
+      this.logger.log('success', `Pushed ${chatId}`);
+    }
+    this.attachListener(chatId);
   }
 
   attachListener(chatId) {
