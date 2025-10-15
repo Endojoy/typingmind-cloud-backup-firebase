@@ -128,6 +128,18 @@ class FirebaseService {
   }
 
   async initialize() {
+
+    if (this.app && !this.db) {
+      firebase.firestore().settings({
+        experimentalForceLongPolling: true,
+        useFetchStreams: false
+      });
+      this.db      = firebase.firestore(this.app);
+      this.storage = firebase.storage(this.app);
+      console.log('init ok (db recreated)');
+      return;
+    }
+
     if (this.app) return;            
 
     try {
