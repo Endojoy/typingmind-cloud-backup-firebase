@@ -458,7 +458,7 @@ class FirebaseService {
     }
     async handleSyncNow(modal) {
       try {
-        if (!this.firebase.app) {
+        if (!this.firebase.db) {
           await this.firebase.initialize();           
           console.log('init ok');
         }
