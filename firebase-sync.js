@@ -216,7 +216,7 @@ class FirebaseService {
     }
 
     const batch = this.db.batch();
-    const cleanMsgs = (localData.messages || []).map(stripUndefined);
+    const cleanMsgs = (localData.messages || []).map(FirebaseService.stripUndefined);
 
     for (const msg of cleanMsgs) {
       const mRef = docRef.collection('messages').doc(msg.id.toString());
