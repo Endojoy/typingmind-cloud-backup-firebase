@@ -101,49 +101,29 @@ class FirebaseService {
   async loadSDK() {
     if (this.sdkLoaded) return;
 
-    await this.loadScript(
-      'https://esm.sh/firebase@9.24.0/compat?bundle&target=es2017'
-    );   
+    const URL_COMPAT =
+      'https://cdnjs.cloudflare.com/ajax/libs/firebase/9.24.0/firebase-compat.min.js';
 
-    this.app     = firebase.initializeApp({
-                  apiKey        : this.config.get('apiKey'),
-                  authDomain    : this.config.get('authDomain'),
-                  projectId     : this.config.get('projectId'),
-                  storageBucket : this.config.get('storageBucket')
-                }, 'tm-sync');
-    this.db      = firebase.firestore(this.app);
-    this.storage = firebase.storage(this.app);
+    await this.loadScript(URL_COMPAT);   
 
-    try { await this.db.enablePersistence(); } catch {}
+    if (!window.firebase) {
+      throw new Error('firebase global missing after load');
+    }
+
     this.sdkLoaded = true;
-    this.logger.log('success','Firebase (esm.sh) loaded');
-  }
-
-  loadScript (src) {
-    return new Promise((resolve, reject) => {
-      if (document.querySelector(`script[data-fb="${src}"]`)) { resolve(); return; }
-      const s = document.createElement('script');
-      s.setAttribute('data-fb', src);
-      s.src     = src;
-      s.async   = true;
-      s.onload  = () => resolve();
-      s.onerror = () => reject();
-      document.head.appendChild(s);
-    });
+    this.logger.log('success', 'Firebase compat bundle loaded');
   }
 
   loadScript(src) {
-    return new Promise((resolve, reject) => {
-      if (document.querySelector(`script[src="${src}"]`)) {
-        resolve();
-        return;
-      }
-      const script = document.createElement('script');
-      script.src = src;
-      script.async = true;
-      script.onload = resolve;
-      script.onerror = () => reject(new Error(`Failed to load ${src}`));
-      document.head.appendChild(script);
+    return new Promise((ok, err) => {
+      if (document.querySelector(`script[data-fb="${src}"]`)) { ok(); return; }
+      const s = document.createElement('script');
+      s.setAttribute('data-fb', src);
+      s.src = src;
+      s.async = true;
+      s.onload = ok;
+      s.onerror = () => err(new Error(`Failed to load ${src}`));
+      document.head.appendChild(s);
     });
   }
 
