@@ -1,5 +1,5 @@
 /*──────────────────────────────────────────────────────────────
-  TypingMind – Firebase Cloud-Sync  v0.2  (Oct-2025)
+  TypingMind – Firebase Cloud-Sync  v0.3  (Oct-2025)
 ──────────────────────────────────────────────────────────────*/
 if (window.typingMindFirebaseSync) {
   console.log("Firebase Sync already loaded");
@@ -96,24 +96,55 @@ class FirebaseService {
     this.storage = null;
     this.listeners = [];
     this.sdkLoaded = false;
+    
+    window.addEventListener('beforeunload', () => {
+      this.listeners.forEach(l => {
+        try { l.unsubscribe(); } catch {}
+      });
+    });
   }
 
   async loadSDK() {
-    if (this.sdkLoaded) return;
+    if (this.sdkLoaded) return;                           
 
-    const BUNDLE =
-      'https://cdnjs.cloudflare.com/ajax/libs/firebase/9.22.2/firebase-compat.min.js';
+    const existing = document.querySelector('script#firebase-compat');
+    if (existing) {
+      await this.waitForFirebaseGlobal();
+      this.sdkLoaded = true;
+      this.logger.log('success', 'Firebase SDK déjà présent dans la page');
+      return;
+    }
 
-    const txt  = await fetch(BUNDLE, {cache: 'no-store'})
-                      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.text(); });
+    const SRC        = 'https://cdnjs.cloudflare.com/ajax/libs/firebase/9.22.2/firebase-compat.min.js';
+    const INTEGRITY  = 'sha512-p+e6X0BVRhyRb0Zsx0ucia4j8y7ZqdGm9cGxPV1XgxJ+0LqIo0H5P8zkKXee5wM9n7StzqJVX2qRucyaRt12Ww=='; 
 
-    const blobURL = URL.createObjectURL(new Blob([txt], {type:'text/javascript'}));
-    await this.loadScript(blobURL);
-    URL.revokeObjectURL(blobURL);
+    await this.loadScript(SRC, {
+      id: 'firebase-compat',
+      integrity: INTEGRITY,
+      crossOrigin: 'anonymous'
+    });
 
-    if (!window.firebase) throw new Error('firebase global missing');
+    await this.waitForFirebaseGlobal();
+
     this.sdkLoaded = true;
-    this.logger.log('success', 'Firebase SDK 9.22.2 loaded (blob)');
+    this.logger.log('success', 'Firebase SDK 9.22.2 chargé (CDN + cache)');
+  }
+
+  waitForFirebaseGlobal() {
+    return new Promise((resolve, reject) => {
+      const max   = 20;      
+      let attempts = 0;
+      const timer = setInterval(() => {
+        if (window.firebase) {
+          clearInterval(timer);
+          return resolve();
+        }
+        if (++attempts > max) {
+          clearInterval(timer);
+          return reject(new Error('firebase global introuvable'));
+        }
+      }, 500);
+    });
   }
 
   loadScript(src) {
@@ -142,6 +173,15 @@ class FirebaseService {
         : firebase.initializeApp(cfg);         
     }
 
+    if (!firebase.auth().currentUser) {
+      try {
+        await firebase.auth().signInAnonymously();
+        this.logger.log('success', 'Signed-in anonymously');
+      } catch (e) {
+        this.logger.log('error', 'Anonymous sign-in failed', e);
+      }
+    }
+
     if (!this.db) {
       this.db      = firebase.firestore();   
       this.storage = firebase.storage();
@@ -151,7 +191,11 @@ class FirebaseService {
         useFetchStreams            : false
       });
 
-      try { await this.db.enableIndexedDbPersistence(); } catch {}
+      try {
+        await this.db.enablePersistence({ synchronizeTabs: true });
+      } catch (_) {
+        /*  */
+      }
     }
   }
 
@@ -183,7 +227,7 @@ class FirebaseService {
 
         const k = cur.key;
         if (typeof k === 'string' && k.startsWith('CHAT_')) {
-          jobs.push(this.syncChatRecord(k, cur.value));
+          jobs.push(this.syncChatRecord(k, FirebaseService.normalizeChat(cur.value, k)));
         }
         cur.continue();                   
       };
@@ -241,7 +285,8 @@ class FirebaseService {
   static stableId(msg) {
     const t = msg.createdAt || msg.timestamp || Date.now();
     const role = msg.role || 'unknown';
-    return `${role}_${t}`;
+    const rand = Math.random().toString(36).slice(2, 6);  
+    return `${role}_${t}_${rand}`;
   }
 
   static chunk(array, size = 400) {
@@ -252,6 +297,24 @@ class FirebaseService {
     return chunks;
   }
 
+  static normalizeChat(raw, key) {
+    const now = Date.now();
+    const obj = {
+      id        : raw.id        || key.replace(/^CHAT_/, ''),
+      title     : raw.title     || raw.name || 'Chat',
+      createdAt : raw.createdAt || now,
+      updatedAt : raw.updatedAt || now,
+      messages  : Array.isArray(raw.messages) ? raw.messages : [],
+      syncedAt  : raw.syncedAt  || 0
+    };
+
+
+    if (!obj.title && obj.messages.length) {
+      const firstUser = obj.messages.find(m => m.role === 'user');
+      obj.title = (firstUser?.content || 'Chat').slice(0, 60);
+    }
+    return obj;
+  }
 
   async flagLocalChatId(chatId, id, msg) {
     const idb = await this.getIndexedDB();
@@ -269,52 +332,59 @@ class FirebaseService {
     };
   }
 
+  async flagLocalSyncedAt(chatId) {
+    const idb = await this.getIndexedDB();
+    const tx  = idb.transaction(['keyval'], 'readwrite');
+    const st  = tx.objectStore('keyval');
+    const req = st.get(chatId);
+    req.onsuccess = () => {
+      const data = req.result;
+      if (!data) return;
+      data.syncedAt = Date.now();
+      st.put(data, chatId);
+    };
+  }
 
   async syncChatRecord(chatId, localData) {
     const docRef   = this.db.collection('chats').doc(chatId);
-
     const snap     = await docRef.get();
     const remoteUp = snap.exists ? snap.data().updatedAt || 0 : 0;
 
-    if (localData.updatedAt > remoteUp) {
+    const hasMetaChange = localData.updatedAt > remoteUp;
+    const lastSynced    = localData.syncedAt || 0;
+
+    if (hasMetaChange) {
       await docRef.set(
         FirebaseService.sanitizeForFirestore({
-          updatedAt : Date.now(),                      
-          title     : localData.title || 'Untitled'   
+          title     : localData.title,
+          updatedAt : Date.now()
         }),
         { merge: true }
       );
     }
 
-    const srcMsgs   = localData.messages || [];
-    const cleanMsgs = srcMsgs
-      .map(m => FirebaseService.sanitizeForFirestore({ ...m }))  
-      .filter(Boolean);                                          
+    const deltaMsgs = (localData.messages || [])
+      .filter(m => (m.updatedAt || m.createdAt || 0) > lastSynced)
+      .map(m => FirebaseService.sanitizeForFirestore({ ...m }))
+      .filter(Boolean);
 
-    const chunks = FirebaseService.chunk(cleanMsgs, 400);
-
-    for (const chunk of chunks) {
+    for (const chunk of FirebaseService.chunk(deltaMsgs, 400)) {
       const batch = this.db.batch();
 
       for (const msg of chunk) {
-        const id     = msg.id ? String(msg.id)
-                              : FirebaseService.stableId(msg);
-        const hadId  = !!msg.id;          
-        msg.id       = id;              
+        const id    = msg.id ? String(msg.id) : FirebaseService.stableId(msg);
+        const fresh = !msg.id;
+        msg.id      = id;
 
-        const mRef   = docRef.collection('messages').doc(id);
+        const mRef  = docRef.collection('messages').doc(id);
         batch.set(mRef, msg, { merge: true });
 
-        
-        if (!hadId) await this.flagLocalChatId(chatId, id, msg);
+        if (fresh) await this.flagLocalChatId(chatId, id, msg);
       }
-
-      await batch.commit();              
+      await batch.commit();
     }
 
-    this.logger.log('success',
-      `Pushed ${chatId} (${cleanMsgs.length} msgs, ${chunks.length} batchs)`);
-
+    await this.flagLocalSyncedAt(chatId);   
     this.attachListener(chatId);
   }
 
@@ -324,9 +394,10 @@ class FirebaseService {
       return;
     }
 
-    if (this.listeners.includes(chatId)) return;
-    
-    this.db.collection('chats').doc(chatId).collection('messages')
+    if (this.listeners.some(l => l.chatId === chatId)) return;
+
+    const unsubscribe = this.db
+      .collection('chats').doc(chatId).collection('messages')
       .orderBy('createdAt')
       .limitToLast(30)
       .onSnapshot(snap => {
@@ -334,8 +405,8 @@ class FirebaseService {
         const msgs = snap.docChanges().map(c => c.doc.data());
         this.injectIntoLocal(chatId, msgs);
       });
-    
-    this.listeners.push(chatId);
+
+    this.listeners.push({ chatId, unsubscribe });
     this.logger.log('info', `Listener attached for ${chatId}`);
   }
 
@@ -352,10 +423,15 @@ class FirebaseService {
           chat.messages.push(m);
         }
       });
+
+      const seen = new Set();
+      chat.messages = chat.messages.filter(m => {
+        if (seen.has(m.id)) return false;
+        seen.add(m.id);
+        return true;
+      });
+
       chat.updatedAt = Date.now();
-      chat.messages = Array.from(
-        new Map(chat.messages.map(msg => [msg.id, msg])).values()
-      );
       st.put(chat, chatId);
       this.logger.log('info', `Injected ${msgs.length} messages into ${chatId}`);
     };
@@ -389,15 +465,15 @@ class FirebaseService {
         try {
           await this.firebase.initialize();     
           this.firebase.db.collection('chats')
-            .orderBy('updatedAt', 'desc')          
-            .limit(50)                             
+            .orderBy('updatedAt', 'desc')
+            .limit(50)
             .onSnapshot(snap => {
               snap.docChanges().forEach(c => {
                 const chatId = c.doc.id;
-                this.firebase.injectIntoLocal(chatId, []);
-                this.firebase.attachListener(chatId);
+                this.firebase.injectIntoLocal(chatId, []);   
+                this.firebase.attachListener(chatId);        
               });
-          });     
+            }); 
           console.log('init ok');                    
           await this.firebase.pushLocalChats();      
           this.startAutoSync();
@@ -428,7 +504,7 @@ class FirebaseService {
 
       const button = document.createElement('button');
       button.setAttribute('data-element-id', 'workspace-tab-cloudsync');
-      button.className = 'min-w-[58px] sm:min-w-0 sm:aspect-auto aspect-square cursor-default h-12 md:h-[50px] flex-col justify-start items-start inline-flex focus:outline-0 focus:text-white w-full relative';
+      button.className = 'min-w-[58px] sm:min-w-0 sm:aspect-auto aspect-square cursor-pointer h-12 md:h-[50px] flex-col justify-start items-start inline-flex focus:outline-0 focus:text-white w-full relative';
       button.innerHTML = `
         <span class="text-white/70 hover:bg-white/20 self-stretch h-12 md:h-[50px] px-0.5 py-1.5 rounded-xl flex-col justify-start items-center gap-1.5 flex transition-colors">
           <div class="relative">
