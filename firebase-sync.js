@@ -413,12 +413,13 @@ class FirebaseService {
       saveBtn.textContent = 'Verifying...';
       actionMsg.textContent = 'Verifying configuration...';
 
+      const get = id => modal.querySelector(id).value.trim();
       const newConfig = {
-        apiKey: modal.querySelector('#fb-apiKey').value.trim(),
-        authDomain: modal.querySelector('#fb-authDomain').value.trim(),
-        projectId: modal.querySelector('#fb-projectId').value.trim(),
-        storageBucket: modal.querySelector('#fb-storageBucket').value.trim(),
-        syncInterval: parseInt(modal.querySelector('#fb-syncInterval').value) || 15,
+        apiKey        : get('#fb-apiKey'),
+        authDomain    : get('#fb-authDomain'),
+        projectId     : get('#fb-projectId'),
+        storageBucket : get('#fb-storageBucket'),
+        syncInterval  : get('#fb-syncInterval'),
       };
 
       if (!newConfig.apiKey || !newConfig.authDomain || !newConfig.projectId || !newConfig.storageBucket) {
