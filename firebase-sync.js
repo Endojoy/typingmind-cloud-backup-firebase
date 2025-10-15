@@ -100,13 +100,14 @@ class FirebaseService {
 
   async loadSDK() {
     if (this.sdkLoaded) return;
-    
-    await this.loadScript('https://www.gstatic.com/firebasejs/9.24.0/firebase-app-compat.js');
-    await this.loadScript('https://www.gstatic.com/firebasejs/9.24.0/firebase-firestore-compat.js');
-    await this.loadScript('https://www.gstatic.com/firebasejs/9.24.0/firebase-storage-compat.js');
-    
+
+    const base = 'https://cdn.jsdelivr.net/npm/firebase@9.24.0/';
+    await this.loadScript(base + 'firebase-app-compat.js');
+    await this.loadScript(base + 'firebase-firestore-compat.js');
+    await this.loadScript(base + 'firebase-storage-compat.js');
+
     this.sdkLoaded = true;
-    this.logger.log('success', 'Firebase SDK loaded');
+    this.logger.log('success', 'Firebase SDK (jsDelivr) loaded');
   }
 
   loadScript(src) {
