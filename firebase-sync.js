@@ -122,7 +122,7 @@ if (window.typingMindFirebaseSync) {
       const script = document.createElement('script');
       script.id = 'firebase-compat';
       script.src = 'https://unpkg.com/firebase@9.22.2/firebase-compat.js';
-      script.crossOrigin = 'anonymous';
+      script.crossorigin = 'anonymous';
       
       await new Promise((resolve, reject) => {
         script.onload = resolve;
