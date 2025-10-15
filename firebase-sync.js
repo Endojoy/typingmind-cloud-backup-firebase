@@ -98,66 +98,51 @@ class FirebaseService {
     this.sdkLoaded = false;
   }
 
-  async loadSDK () {
+  async loadSDK() {
     if (this.sdkLoaded) return;
-    const CDN_URL =
+
+    const BUNDLE =
       'https://cdnjs.cloudflare.com/ajax/libs/firebase/9.22.2/firebase-compat.min.js';
 
-    const code = await fetch(CDN_URL, { cache: 'no-store' })
-                        .then(r => {
-                          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-                          return r.text();
-                        });
+    const txt  = await fetch(BUNDLE, {cache: 'no-store'})
+                      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.text(); });
 
-    const blobURL = URL.createObjectURL(
-          new Blob([code], { type: 'text/javascript' }));
+    const blobURL = URL.createObjectURL(new Blob([txt], {type:'text/javascript'}));
     await this.loadScript(blobURL);
     URL.revokeObjectURL(blobURL);
 
-    if (!window.firebase)
-      throw new Error('firebase global missing after blob eval');
-
+    if (!window.firebase) throw new Error('firebase global missing');
     this.sdkLoaded = true;
-    this.logger.log('success', 'Firebase SDK 9.22.2 loaded via blob');
+    this.logger.log('success', 'Firebase SDK 9.22.2 loaded (blob)');
   }
 
-  loadScript (src) {
+  loadScript(src) {
     return new Promise((ok, err) => {
       const s = document.createElement('script');
-      s.src = src;
+      s.src   = src;
       s.async = true;
-      s.onload = ok;
-      s.onerror = () => err(new Error(`failed ${src}`));
+      s.onload= ok;
+      s.onerror = () => err(new Error(`fail ${src}`));
       document.head.appendChild(s);
     });
   }
 
   async initialize() {
-    if (this.app) return;
-    
-    await this.loadSDK();
-    
+    if (this.app) return;          
+    await this.loadSDK();          
+
     const cfg = {
-      apiKey: this.config.get('apiKey'),
-      authDomain: this.config.get('authDomain'),
-      projectId: this.config.get('projectId'),
-      storageBucket: this.config.get('storageBucket'),
+      apiKey       : this.config.get('apiKey'),
+      authDomain   : this.config.get('authDomain'),
+      projectId    : this.config.get('projectId'),
+      storageBucket: this.config.get('storageBucket')
     };
 
-    this.app = firebase.initializeApp(cfg, 'tm-sync-' + Date.now());
-    this.db = firebase.firestore(this.app);
+    this.app     = firebase.initializeApp(cfg, 'tm-sync');
+    this.db      = firebase.firestore(this.app);
     this.storage = firebase.storage(this.app);
-    
-    try {
-      await this.db.enablePersistence();
-    } catch (e) {
-      if (e.code === 'failed-precondition') {
-        this.logger.log('warning', 'Multiple tabs open, persistence only in first tab');
-      } else if (e.code === 'unimplemented') {
-        this.logger.log('warning', 'Browser does not support persistence');
-      }
-    }
-    
+
+    try { await this.db.enablePersistence(); } catch {}
     this.logger.log('success', 'Firebase initialized');
   }
 
