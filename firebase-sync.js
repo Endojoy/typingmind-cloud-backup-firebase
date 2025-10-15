@@ -202,6 +202,58 @@ class FirebaseService {
     return value;
   }
 
+  static sanitizeForFirestore(value) {
+    if (
+      value === null ||
+      typeof value === 'string' ||
+      (typeof value === 'number' && isFinite(value)) ||
+      typeof value === 'boolean'
+    ) return value;
+
+    if (value instanceof firebase.firestore.Timestamp) return value;
+    if (value instanceof Date) return value.toISOString();
+
+    if (Array.isArray(value)) {
+      const arr = value
+        .map(FirebaseService.sanitizeForFirestore)
+        .filter(v => v !== undefined);
+      return arr.length ? arr : undefined;
+    }
+
+    if (value && typeof value === 'object') {
+      const cleaned = {};
+      for (const [k, v] of Object.entries(value)) {
+        const cv = FirebaseService.sanitizeForFirestore(v);
+        if (cv !== undefined) cleaned[k] = cv;
+      }
+      return Object.keys(cleaned).length ? cleaned : undefined;
+    }
+    return undefined;         
+  }
+
+  static stableId(msg) {
+    const t = msg.createdAt || msg.timestamp || Date.now();
+    const role = msg.role || 'unknown';
+    return `${role}_${t}`;
+  }
+
+
+  async flagLocalChatId(chatId, id, msg) {
+    const idb = await this.getIndexedDB();
+    const tx  = idb.transaction(['keyval'], 'readwrite');
+    const st  = tx.objectStore('keyval');
+    const req = st.get(chatId);
+    req.onsuccess = () => {
+      const data = req.result;
+      if (!data) return;
+      const found = data.messages.find(
+        m => !m.id && m.content === msg.content && m.role === msg.role
+      );
+      if (found) found.id = id;
+      st.put(data, chatId);
+    };
+  }
+
 
   async syncChatRecord(chatId, localData) {
     const docRef   = this.db.collection('chats').doc(chatId);
@@ -210,27 +262,32 @@ class FirebaseService {
 
     if (localData.updatedAt > remoteUp) {
       await docRef.set(
-        { updatedAt: Date.now() },
+        FirebaseService.sanitizeForFirestore({ updatedAt: Date.now() }),
         { merge: true }
       );
     }
 
     const batch     = this.db.batch();
-    const cleanMsgs = (localData.messages || []).map(FirebaseService.stripUndefined);
+    const srcMsgs   = localData.messages || [];
+    const cleanMsgs = srcMsgs
+      .map(m => FirebaseService.sanitizeForFirestore({ ...m }))
+      .filter(Boolean);
 
-    let autoIndex = 0;                              
+    let autoIndex = 0;
 
     for (const msg of cleanMsgs) {
-      const id = (msg && msg.id != null && msg.id !== '')
-        ? String(msg.id)
-        : `m_${Date.now()}_${autoIndex++}`;
-
-      const msgForSave = { ...msg, id };
+      const id = msg.id ? String(msg.id)
+                        : FirebaseService.stableId(msg);
+      const firstTime = !msg.id;
+      msg.id = id;
 
       const mRef = docRef.collection('messages').doc(id);
-      batch.set(mRef, msgForSave, { merge: true });
-    }
+      batch.set(mRef, msg, { merge: true });
 
+      if (firstTime) {
+        await this.flagLocalChatId(chatId, id, msg);
+      }
+    }
     if (cleanMsgs.length) await batch.commit();
 
     this.logger.log('success',
