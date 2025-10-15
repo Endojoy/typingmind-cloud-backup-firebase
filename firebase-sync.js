@@ -1,5 +1,5 @@
 /*──────────────────────────────────────────────────────────────
-  TypingMind – Firebase Cloud-Sync  v2.7  (Oct-2025) - FIXED
+  TypingMind – Firebase Sync v3.0 SIMPLE (Oct-2025)
 ──────────────────────────────────────────────────────────────*/
 if (window.typingMindFirebaseSync) {
   console.log("Firebase Sync already loaded");
@@ -7,7 +7,7 @@ if (window.typingMindFirebaseSync) {
   window.typingMindFirebaseSync = true;
 
   /* ============================================================
-     1. ConfigManager
+     CONFIGURATION
   ============================================================ */
   class ConfigManager {
     constructor() {
@@ -19,7 +19,7 @@ if (window.typingMindFirebaseSync) {
         authDomain: '',
         projectId: '',
         storageBucket: '',
-        syncInterval: 30, 
+        syncInterval: 60,
       };
       const stored = {};
       const keyMap = {
@@ -32,7 +32,7 @@ if (window.typingMindFirebaseSync) {
       Object.keys(defaults).forEach(key => {
         const val = localStorage.getItem(keyMap[key]);
         if (val !== null) {
-          stored[key] = key === 'syncInterval' ? parseInt(val) || 30 : val;
+          stored[key] = key === 'syncInterval' ? parseInt(val) || 60 : val;
         }
       });
       return { ...defaults, ...stored };
@@ -61,7 +61,7 @@ if (window.typingMindFirebaseSync) {
   }
 
   /* ============================================================
-     2. Logger
+     LOGGER
   ============================================================ */
   class Logger {
     constructor() {
@@ -75,877 +75,284 @@ if (window.typingMindFirebaseSync) {
       const icon = icons[type] || 'ℹ️';
       console.log(`${icon} [${timestamp}] ${message}`, data || '');
     }
-    setEnabled(enabled) {
-      this.enabled = enabled;
-      const url = new URL(window.location);
-      if (enabled) url.searchParams.set('log', 'true');
-      else url.searchParams.delete('log');
-      window.history.replaceState({}, '', url);
-    }
   }
 
-/* ============================================================
-   3. FirebaseService 
-============================================================ */
-class FirebaseService {
-  constructor(config, logger) {
-    this.config = config;
-    this.logger = logger;
-    this.app = null;
-    this.db = null;
-    this.storage = null;
-    this.listeners = [];
-    this.sdkLoaded = false;
-    this.isSyncing = false;
-    this.dbInstance = null;
-    this.mergeLocks = new Map();
-    this.syncLocks = new Set();
-    this.watcherInterval = null;
-    this.knownChatIds = new Set(); 
-    this.lastFullSync = 0; 
-    this.listenerIgnoreNext = new Map(); 
-    
-    window.addEventListener('beforeunload', () => {
-      if (this.watcherInterval) clearInterval(this.watcherInterval);
-      this.listeners.forEach(l => {
-        try { l.unsubscribe(); } catch {}
-      });
-    });
-  }
-
-  async loadSDK() {
-    if (this.sdkLoaded) return;
-
-    const existing = document.querySelector('script#firebase-compat');
-    if (existing) {
-      await this.waitForFirebaseGlobal();
-      this.sdkLoaded = true;
-      this.logger.log('success', 'Firebase SDK already present');
-      return;
+  /* ============================================================
+     FIREBASE SERVICE - 
+  ============================================================ */
+  class FirebaseService {
+    constructor(config, logger) {
+      this.config = config;
+      this.logger = logger;
+      this.app = null;
+      this.db = null;
+      this.userId = null;
+      this.sdkLoaded = false;
+      this.isSyncing = false;
     }
 
-    const SRC = 'https://unpkg.com/firebase@9.22.2/firebase-compat.js';
-
-    await this.loadScript(SRC, {
-      id: 'firebase-compat',
-      crossorigin: 'anonymous'
-    });
-
-    await this.waitForFirebaseGlobal();
-
-    this.sdkLoaded = true;
-    this.logger.log('success', 'Firebase SDK 9.22.2 loaded');
-  }
-
-  waitForFirebaseGlobal() {
-    return new Promise((resolve, reject) => {
-      const max = 20;
-      let attempts = 0;
-      const timer = setInterval(() => {
-        if (window.firebase) {
-          clearInterval(timer);
-          return resolve();
-        }
-        if (++attempts > max) {
-          clearInterval(timer);
-          return reject(new Error('firebase global not found'));
-        }
-      }, 500);
-    });
-  }
-
-  loadScript(src, attrs = {}) {
-    return new Promise((ok, err) => {
-      const s = document.createElement('script');
-      s.src = src;
-      s.async = true;
-      Object.entries(attrs).forEach(([k, v]) => s.setAttribute(k, v));
-      s.onload = ok;
-      s.onerror = () => err(new Error(`Failed loading ${src}`));
-      document.head.appendChild(s);
-    });
-  }
-
-  async initialize() {
-    await this.loadSDK();
-
-    if (!this.app) {
-      const cfg = {
-        apiKey: this.config.get('apiKey'),
-        authDomain: this.config.get('authDomain'),
-        projectId: this.config.get('projectId'),
-        storageBucket: this.config.get('storageBucket')
-      };
-      this.app = firebase.apps.length
-        ? firebase.app()
-        : firebase.initializeApp(cfg);
-    }
-
-    if (!firebase.auth().currentUser) {
-      await firebase.auth().signInAnonymously();
-      this.logger.log('success', 'Signed-in anonymously');
-    }
-
-    if (!this.db) {
-      this.db = firebase.firestore();
-      this.storage = firebase.storage();
-
-      this.db.settings({
-        experimentalForceLongPolling: true,
-        useFetchStreams: false
-      });
-
-      try {
-        await this.db.enablePersistence({ synchronizeTabs: true });
-      } catch (_) {}
-    }
-    
-    this.listeners.forEach(l => {
-      try { l.unsubscribe(); } catch {}
-    });
-    this.listeners = [];
-    this.knownChatIds.clear();
-  }
-
-  startChatWatcher() {
-    if (this.watcherInterval) return;
-    
-    this.watcherInterval = setInterval(async () => {
-      try {
-        const idb = await this.getIndexedDB();
-        const tx = idb.transaction(['keyval'], 'readonly');
-        const store = tx.objectStore('keyval');
-        
-        await new Promise((resolve) => {
-          store.getAllKeys().onsuccess = (e) => {
-            const keys = e.target.result.filter(k => 
-              typeof k === 'string' && k.startsWith('CHAT_')
-            );
-            
-            keys.forEach(chatId => {
-              if (!this.knownChatIds.has(chatId)) {
-                this.logger.log('info', `📝 New chat detected: ${chatId}`);
-                this.knownChatIds.add(chatId);
-                this.attachListener(chatId);
-              }
-            });
-            
-            resolve();
-          };
-        });
-      } catch (e) {
-        this.logger.log('error', 'Chat watcher error', e);
-      }
-    }, 10000); 
-    
-    this.logger.log('info', '👀 Chat watcher started (checking every 10s)');
-  }
-
-  async pushLocalChats() {
-    if (this.isSyncing) {
-      this.logger.log('warning', 'Sync already in progress, skipping');
-      return;
-    }
-
-    this.isSyncing = true;
-    const now = Date.now();
-
-    try {
-      if (!this.db) {
-        throw new Error('Firebase not initialized');
+    async loadSDK() {
+      if (this.sdkLoaded) return;
+      const existing = document.querySelector('script#firebase-compat');
+      if (existing) {
+        await this.waitForFirebaseGlobal();
+        this.sdkLoaded = true;
+        return;
       }
 
-      const idb = await this.getIndexedDB();
-      const tx = idb.transaction(['keyval'], 'readonly');
-      const store = tx.objectStore('keyval');
-      
-      const chatsToSync = [];
-      const recentThreshold = now - (7 * 24 * 60 * 60 * 1000); 
+      const script = document.createElement('script');
+      script.id = 'firebase-compat';
+      script.src = 'https://unpkg.com/firebase@9.22.2/firebase-compat.js';
+      script.crossOrigin = 'anonymous';
       
       await new Promise((resolve, reject) => {
-        store.openCursor().onsuccess = (e) => {
-          const cur = e.target.result;
-          if (!cur) {
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.appendChild(script);
+      });
+
+      await this.waitForFirebaseGlobal();
+      this.sdkLoaded = true;
+      this.logger.log('success', 'Firebase SDK loaded');
+    }
+
+    waitForFirebaseGlobal() {
+      return new Promise((resolve, reject) => {
+        let attempts = 0;
+        const timer = setInterval(() => {
+          if (window.firebase) {
+            clearInterval(timer);
             resolve();
+          }
+          if (++attempts > 20) {
+            clearInterval(timer);
+            reject(new Error('Firebase not found'));
+          }
+        }, 500);
+      });
+    }
+
+    async initialize() {
+      await this.loadSDK();
+
+      if (!this.app) {
+        const cfg = {
+          apiKey: this.config.get('apiKey'),
+          authDomain: this.config.get('authDomain'),
+          projectId: this.config.get('projectId'),
+          storageBucket: this.config.get('storageBucket')
+        };
+        this.app = firebase.apps.length ? firebase.app() : firebase.initializeApp(cfg);
+      }
+
+      if (!firebase.auth().currentUser) {
+        const result = await firebase.auth().signInAnonymously();
+        this.userId = result.user.uid;
+        this.logger.log('success', `Signed in: ${this.userId}`);
+      } else {
+        this.userId = firebase.auth().currentUser.uid;
+      }
+
+      if (!this.db) {
+        this.db = firebase.firestore();
+        try {
+          await this.db.enablePersistence({ synchronizeTabs: true });
+        } catch {}
+      }
+    }
+
+    async syncAllChats() {
+      if (this.isSyncing) {
+        this.logger.log('warning', 'Already syncing, skip');
+        return;
+      }
+
+      this.isSyncing = true;
+      this.logger.log('start', '🔄 Starting full sync...');
+
+      try {
+        const localChats = await this.getAllLocalChats();
+        this.logger.log('info', `Found ${localChats.length} local chats`);
+
+        const uploadPromises = localChats.map(chat => this.uploadChat(chat));
+        await Promise.all(uploadPromises);
+        this.logger.log('success', `✅ Uploaded ${localChats.length} chats`);
+
+        const remoteChats = await this.downloadAllChats();
+        this.logger.log('info', `Found ${remoteChats.length} remote chats`);
+
+        for (const remoteChat of remoteChats) {
+          await this.mergeRemoteChat(remoteChat);
+        }
+        this.logger.log('success', `✅ Merged ${remoteChats.length} chats`);
+
+        this.logger.log('success', '✅ SYNC COMPLETE');
+
+      } catch (error) {
+        this.logger.log('error', 'Sync failed', error);
+        throw error;
+      } finally {
+        this.isSyncing = false;
+      }
+    }
+
+    async getAllLocalChats() {
+      const idb = await this.getIndexedDB();
+      return new Promise((resolve, reject) => {
+        const tx = idb.transaction(['keyval'], 'readonly');
+        const store = tx.objectStore('keyval');
+        const chats = [];
+
+        store.openCursor().onsuccess = (e) => {
+          const cursor = e.target.result;
+          if (!cursor) {
+            resolve(chats);
             return;
           }
 
-          const k = cur.key;
-          if (typeof k === 'string' && k.startsWith('CHAT_')) {
-            const value = cur.value;
-            
-            const shouldSync = 
-              (this.lastFullSync === 0) || 
-              !value.syncedAt || 
-              (value.updatedAt && value.updatedAt > recentThreshold) || 
-              (value.syncedAt && value.updatedAt > value.syncedAt); 
-            
-            if (shouldSync) {
-              chatsToSync.push({ 
-                key: k, 
-                value: value
-              });
-            }
+          const key = cursor.key;
+          if (typeof key === 'string' && key.startsWith('CHAT_')) {
+            const chat = cursor.value;
+            chats.push({
+              id: key.replace('CHAT_', ''),
+              data: chat
+            });
           }
-          cur.continue();
+          cursor.continue();
         };
+
         store.openCursor().onerror = reject;
       });
+    }
 
-      this.logger.log('info', `🔄 Syncing ${chatsToSync.length} chats (${this.lastFullSync === 0 ? 'FULL' : 'INCREMENTAL'})...`);
+    async uploadChat(chat) {
+      const docRef = this.db.collection('users').doc(this.userId).collection('chats').doc(chat.id);
       
-      for (const { key, value } of chatsToSync) {
-        const normalized = FirebaseService.normalizeChat(value, key);
-        await this.syncChatRecord(key, normalized);
-        this.knownChatIds.add(key); 
-      }
-
-      this.lastFullSync = now;
-
-    } finally {
-      this.isSyncing = false;
-    }
-  }
-
-  static toValidTimestamp(value) {
-    if (!value) return firebase.firestore.Timestamp.now();
-    
-    if (value instanceof firebase.firestore.Timestamp) return value;
-    
-    if (value instanceof Date) {
-      if (isNaN(value.getTime())) return firebase.firestore.Timestamp.now();
-      return firebase.firestore.Timestamp.fromDate(value);
-    }
-    
-    if (typeof value === 'number') {
-      if (!isFinite(value) || value < 0 || value > 8640000000000000) {
-        return firebase.firestore.Timestamp.now();
-      }
-      return firebase.firestore.Timestamp.fromMillis(value);
-    }
-    
-    if (typeof value === 'string') {
-      const parsed = Date.parse(value);
-      if (!isNaN(parsed)) {
-        return firebase.firestore.Timestamp.fromMillis(parsed);
-      }
-    }
-    
-    return firebase.firestore.Timestamp.now();
-  }
-
-  static sanitizeForFirestore(value, seen = new WeakSet()) {
-    if (value === null || value === undefined) return value;
-    
-    if (
-      typeof value === 'string' ||
-      (typeof value === 'number' && isFinite(value)) ||
-      typeof value === 'boolean'
-    ) return value;
-
-    if (value instanceof firebase.firestore.Timestamp) return value;
-    
-    if (value instanceof Date || typeof value === 'number') {
-      return FirebaseService.toValidTimestamp(value);
-    }
-
-    if (Array.isArray(value)) {
-      return value
-        .map(v => FirebaseService.sanitizeForFirestore(v, seen))
-        .filter(v => v !== undefined);
-    }
-
-    if (typeof value === 'object') {
-      if (seen.has(value)) return undefined;
-      seen.add(value);
-
-      const cleaned = {};
-      for (const [k, v] of Object.entries(value)) {
-        const cv = FirebaseService.sanitizeForFirestore(v, seen);
-        if (cv !== undefined) cleaned[k] = cv;
-      }
-      return Object.keys(cleaned).length ? cleaned : undefined;
-    }
-    
-    return undefined;
-  }
-
-  static normalizeChat(raw, key) {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-      return {
-        id: key.replace(/^CHAT_/, ''),
-        title: 'Chat',
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        messages: [],
-        syncedAt: 0
+      const data = {
+        id: chat.id,
+        title: chat.data.title || 'Chat',
+        messages: this.sanitizeMessages(chat.data.messages || []),
+        createdAt: firebase.firestore.Timestamp.fromMillis(chat.data.createdAt || Date.now()),
+        updatedAt: firebase.firestore.Timestamp.fromMillis(chat.data.updatedAt || Date.now()),
+        syncedAt: firebase.firestore.FieldValue.serverTimestamp()
       };
+
+      await docRef.set(data);
+      this.logger.log('info', `📤 Uploaded: ${chat.id} (${data.messages.length} msgs)`);
     }
 
-    const now = Date.now();
-    
-    const obj = {
-      ...raw,
-      id: raw.id || key.replace(/^CHAT_/, ''),
-      title: raw.title || raw.name || 'Chat',
-      createdAt: raw.createdAt || now,
-      updatedAt: raw.updatedAt || now,
-      messages: [],
-      syncedAt: raw.syncedAt || 0
-    };
-
-    if (Array.isArray(raw.messages)) {
-      obj.messages = raw.messages
-        .filter(m => m && typeof m === 'object' && !Array.isArray(m))
-        .map(m => ({
-          ...m,
-          createdAt: m.createdAt || m.timestamp || now,
-          updatedAt: m.updatedAt || m.timestamp || now
-        }));
+    sanitizeMessages(messages) {
+      if (!Array.isArray(messages)) return [];
+      
+      return messages
+        .filter(m => m && typeof m === 'object')
+        .map(m => {
+          const clean = {
+            role: m.role || 'user',
+            content: m.content || '',
+            createdAt: m.createdAt || Date.now()
+          };
+          
+          if (m.id) clean.id = m.id;
+          
+          if (m.model) clean.model = m.model;
+          if (m.plugin_name) clean.plugin_name = m.plugin_name;
+          
+          return clean;
+        });
     }
 
-    if (!obj.title && obj.messages.length) {
-      const firstUser = obj.messages.find(m => m.role === 'user');
-      if (firstUser && firstUser.content) {
-        obj.title = firstUser.content.slice(0, 60);
-      }
-    }
-    
-    return obj;
-  }
-
-  async flagLocalSyncedAt(chatId) {
-    const idb = await this.getIndexedDB();
-    return new Promise((resolve, reject) => {
-      const tx = idb.transaction(['keyval'], 'readwrite');
-      const st = tx.objectStore('keyval');
-      const req = st.get(chatId);
-      
-      req.onsuccess = () => {
-        const data = req.result;
-        if (!data) {
-          resolve();
-          return;
-        }
-        
-        data.syncedAt = Date.now();
-        const putReq = st.put(data, chatId);
-        putReq.onsuccess = () => resolve();
-        putReq.onerror = () => reject(putReq.error);
-      };
-      
-      req.onerror = () => reject(req.error);
-    });
-  }
-
-  async syncChatRecord(chatId, localData) {
-    if (this.syncLocks.has(chatId)) {
-      this.logger.log('warning', `Sync already in progress for ${chatId}`);
-      return;
-    }
-    this.syncLocks.add(chatId);
-
-    try {
-      const docRef = this.db.collection('chats').doc(chatId);
-      
-      const snap = await docRef.get();
-      
-      let remoteUp = 0;
-      if (snap.exists) {
-        const data = snap.data();
-        if (data && data.updatedAt) {
-          if (data.updatedAt.toMillis) {
-            remoteUp = data.updatedAt.toMillis();
-          } else if (typeof data.updatedAt === 'number') {
-            remoteUp = data.updatedAt;
-          }
-        }
-      }
-      
-      const hasMetaChange = localData.updatedAt > remoteUp;
-
-      if (hasMetaChange) {
-        await docRef.set(
-          {
-            title: localData.title || 'Chat',
-            updatedAt: FirebaseService.toValidTimestamp(Date.now()),
-            createdAt: FirebaseService.toValidTimestamp(localData.createdAt)
-          },
-          { merge: true }
-        );
-      }
-
-      const remoteSnapshot = await docRef.collection('messages')
-        .orderBy('createdAt')
+    async downloadAllChats() {
+      const snapshot = await this.db
+        .collection('users')
+        .doc(this.userId)
+        .collection('chats')
         .get();
-      
-      const remoteMessages = remoteSnapshot.docs.map(d => {
-        const data = d.data();
+
+      return snapshot.docs.map(doc => {
+        const data = doc.data();
         return {
-          id: d.id,
-          ...data,
-          createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : data.createdAt,
-          updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : data.updatedAt
+          id: doc.id,
+          title: data.title,
+          messages: data.messages || [],
+          createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : Date.now(),
+          updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : Date.now()
         };
       });
-
-      const remoteMap = new Map(remoteMessages.map(m => [m.id, m]));
-      
-      const messagesToUpload = [];
-      const localIndexToId = new Map();
-      
-      const lastSynced = localData.syncedAt || 0;
-      
-      localData.messages.forEach((msg, index) => {
-        if (!msg || typeof msg !== 'object') return;
-
-        let docId;
-        let shouldUpload = false;
-
-        if (msg.id) {
-          docId = String(msg.id);
-          const remote = remoteMap.get(docId);
-          
-          if (!remote) {
-            shouldUpload = true;
-          } else {
-            const localTime = (typeof msg.updatedAt === 'number') ? msg.updatedAt : 0;
-            const remoteTime = (typeof remote.updatedAt === 'number') ? remote.updatedAt : 0;
-            shouldUpload = localTime > remoteTime;
-          }
-        } else {
-          const msgTime = msg.updatedAt || msg.createdAt || 0;
-          
-          if (msgTime > lastSynced) {
-            const newDocRef = docRef.collection('messages').doc();
-            docId = newDocRef.id;
-            shouldUpload = true;
-            localIndexToId.set(index, docId);
-          }
-        }
-
-        if (shouldUpload && docId) {
-          const msgCopy = { 
-            ...msg, 
-            id: docId
-          };
-          
-          const sanitized = {};
-          for (const [key, val] of Object.entries(msgCopy)) {
-            if (key === 'createdAt' || key === 'updatedAt') {
-              sanitized[key] = FirebaseService.toValidTimestamp(val);
-            } else {
-              const clean = FirebaseService.sanitizeForFirestore(val);
-              if (clean !== undefined) {
-                sanitized[key] = clean;
-              }
-            }
-          }
-          
-          if (sanitized && Object.keys(sanitized).length > 0) {
-            messagesToUpload.push({ id: docId, data: sanitized });
-          }
-        }
-      });
-
-      if (messagesToUpload.length > 0) {
-        this.listenerIgnoreNext.set(chatId, Date.now() + 5000); 
-        
-        this.logger.log('info', `📤 Uploading ${messagesToUpload.length} messages to ${chatId}`);
-        
-        const maxBatchSize = 400;
-        for (let i = 0; i < messagesToUpload.length; i += maxBatchSize) {
-          const chunk = messagesToUpload.slice(i, i + maxBatchSize);
-          const batch = this.db.batch();
-          
-          chunk.forEach(({ id, data }) => {
-            const mRef = docRef.collection('messages').doc(id);
-            batch.set(mRef, data, { merge: true });
-          });
-          
-          await batch.commit();
-        }
-      }
-
-      if (localIndexToId.size > 0) {
-        await this.updateLocalMessageIds(chatId, localIndexToId);
-      }
-
-      const localIds = new Set(
-        localData.messages
-          .filter(m => m && m.id)
-          .map(m => String(m.id))
-      );
-      
-      localIndexToId.forEach(id => localIds.add(id));
-
-      const remoteMsgsToDownload = remoteMessages.filter(m => 
-        !localIds.has(m.id)
-      );
-
-      if (remoteMsgsToDownload.length > 0) {
-        this.logger.log('info', `📥 Downloading ${remoteMsgsToDownload.length} messages from ${chatId}`);
-        await this.mergeIntoLocal(chatId, remoteMsgsToDownload);
-      }
-
-      await this.flagLocalSyncedAt(chatId);
-      
-    } catch (error) {
-      this.logger.log('error', `syncChatRecord failed for ${chatId}`, error);
-      throw error;
-    } finally {
-      this.syncLocks.delete(chatId);
-    }
-  }
-
-  async updateLocalMessageIds(chatId, indexToIdMap) {
-    const idb = await this.getIndexedDB();
-    return new Promise((resolve, reject) => {
-      const tx = idb.transaction(['keyval'], 'readwrite');
-      const st = tx.objectStore('keyval');
-      const req = st.get(chatId);
-      
-      req.onsuccess = () => {
-        const data = req.result;
-        if (!data || !Array.isArray(data.messages)) {
-          resolve();
-          return;
-        }
-        
-        indexToIdMap.forEach((id, index) => {
-          if (data.messages[index] && !data.messages[index].id) {
-            data.messages[index].id = id;
-            data.messages[index].updatedAt = Date.now();
-          }
-        });
-        
-        data.updatedAt = Date.now();
-        
-        const putReq = st.put(data, chatId);
-        putReq.onsuccess = () => resolve();
-        putReq.onerror = () => reject(putReq.error);
-      };
-      
-      req.onerror = () => reject(req.error);
-    });
-  }
-
-  attachListener(chatId) {
-    if (!this.db) {
-      this.logger.log('error', `attachListener(${chatId}) called but this.db is null`);
-      return;
     }
 
-    if (this.listeners.some(l => l.chatId === chatId)) {
-      this.logger.log('warning', `Listener already exists for ${chatId}`);
-      return;
-    }
+    async mergeRemoteChat(remoteChat) {
+      const chatKey = `CHAT_${remoteChat.id}`;
+      const idb = await this.getIndexedDB();
 
-
-    const fiveMinutesAgo = firebase.firestore.Timestamp.fromMillis(
-      Date.now() - (5 * 60 * 1000)
-    );
-
-    const unsubscribe = this.db
-      .collection('chats').doc(chatId).collection('messages')
-      .where('updatedAt', '>=', fiveMinutesAgo) 
-      .orderBy('updatedAt', 'desc')
-      .limit(50)
-      .onSnapshot(snap => {
-        const ignoreUntil = this.listenerIgnoreNext.get(chatId) || 0;
-        if (Date.now() < ignoreUntil) {
-          this.logger.log('info', `🔇 Ignoring listener event for ${chatId} (own upload)`);
-          return;
-        }
-
-        if (!snap.docChanges().length || this.isSyncing) return;
-        
-        const changes = snap.docChanges();
-        
-        const msgsToInject = changes
-          .filter(c => c.type === 'added' || c.type === 'modified')
-          .map(c => {
-            const data = c.doc.data();
-            return {
-              id: c.doc.id,
-              ...data,
-              createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : data.createdAt,
-              updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : data.updatedAt
-            };
-          });
-        
-        const msgsToRemove = changes
-          .filter(c => c.type === 'removed')
-          .map(c => c.doc.id);
-        
-        if (msgsToInject.length > 0) {
-          this.logger.log('info', `📨 Listener received ${msgsToInject.length} messages for ${chatId}`);
-          this.mergeIntoLocal(chatId, msgsToInject).catch(e => {
-            this.logger.log('error', 'Failed to merge messages', e);
-          });
-        }
-
-        if (msgsToRemove.length > 0) {
-          this.removeFromLocal(chatId, msgsToRemove).catch(e => {
-            this.logger.log('error', 'Failed to remove messages', e);
-          });
-        }
-      }, error => {
-        this.logger.log('error', `Listener error for ${chatId}`, error);
-      });
-
-    this.listeners.push({ chatId, unsubscribe });
-    this.logger.log('info', `👂 Listener attached for ${chatId} (recent messages only)`);
-  }
-
-  async mergeIntoLocal(chatId, msgs) {
-    if (!msgs || msgs.length === 0) return;
-
-    if (!this.mergeLocks.has(chatId)) {
-      this.mergeLocks.set(chatId, {
-        locked: false,
-        queue: []
-      });
-    }
-
-    const lockInfo = this.mergeLocks.get(chatId);
-
-    if (lockInfo.locked) {
       return new Promise((resolve, reject) => {
-        lockInfo.queue.push({ msgs, resolve, reject });
+        const tx = idb.transaction(['keyval'], 'readwrite');
+        const store = tx.objectStore('keyval');
+        
+        const getReq = store.get(chatKey);
+        
+        getReq.onsuccess = () => {
+          const localChat = getReq.result;
+
+          if (!localChat) {
+            const newChat = {
+              id: remoteChat.id,
+              title: remoteChat.title,
+              messages: remoteChat.messages,
+              createdAt: remoteChat.createdAt,
+              updatedAt: remoteChat.updatedAt,
+              syncedAt: Date.now()
+            };
+            
+            store.put(newChat, chatKey).onsuccess = () => {
+              this.logger.log('info', `📥 Created new: ${remoteChat.id}`);
+              resolve();
+            };
+            return;
+          }
+
+          const localTime = localChat.updatedAt || 0;
+          const remoteTime = remoteChat.updatedAt || 0;
+
+          if (remoteTime > localTime) {
+            localChat.title = remoteChat.title;
+            localChat.messages = remoteChat.messages;
+            localChat.updatedAt = remoteChat.updatedAt;
+            localChat.syncedAt = Date.now();
+            
+            store.put(localChat, chatKey).onsuccess = () => {
+              this.logger.log('info', `📥 Updated: ${remoteChat.id}`);
+              resolve();
+            };
+          } else {
+            this.logger.log('info', `⏭️ Skipped: ${remoteChat.id} (local newer)`);
+            resolve();
+          }
+        };
+
+        getReq.onerror = reject;
       });
     }
 
-    lockInfo.locked = true;
-
-    try {
-      await this._performMerge(chatId, msgs);
-      
-      while (lockInfo.queue.length > 0) {
-        const next = lockInfo.queue.shift();
-        try {
-          await this._performMerge(chatId, next.msgs);
-          next.resolve();
-        } catch (e) {
-          next.reject(e);
-        }
-      }
-      
-    } finally {
-      lockInfo.locked = false;
-    }
-  }
-
-  async _performMerge(chatId, msgs) {
-    const idb = await this.getIndexedDB();
-    
-    return new Promise((resolve, reject) => {
-      const tx = idb.transaction(['keyval'], 'readwrite');
-      
-      let timeoutHandle;
-      const setupTimeout = () => {
-        timeoutHandle = setTimeout(() => {
-          try {
-            tx.abort();
-          } catch {}
-          reject(new Error('Transaction timeout'));
-        }, 5000);
-      };
-      
-      setupTimeout();
-      
-      const clearTimer = () => {
-        if (timeoutHandle) {
-          clearTimeout(timeoutHandle);
-          timeoutHandle = null;
-        }
-      };
-      
-      tx.oncomplete = () => {
-        clearTimer();
-        resolve();
-      };
-      
-      tx.onerror = () => {
-        clearTimer();
-        reject(tx.error);
-      };
-      
-      tx.onabort = () => {
-        clearTimer();
-        reject(new Error('Transaction aborted'));
-      };
-      
-      const st = tx.objectStore('keyval');
-      const req = st.get(chatId);
-      
-      req.onsuccess = () => {
-        const chat = req.result || { 
-          id: chatId.replace(/^CHAT_/, ''),
-          messages: [], 
-          updatedAt: 0 
-        };
+    async getIndexedDB() {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open('keyval-store', 1);
         
-        if (!Array.isArray(chat.messages)) {
-          chat.messages = [];
-        }
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(new Error('Failed to open IndexedDB'));
         
-        const existingById = new Map(
-          chat.messages.filter(m => m && m.id).map(m => [m.id, m])
-        );
-        
-        let addedCount = 0;
-        let updatedCount = 0;
-        
-        msgs.forEach(m => {
-          if (!m || typeof m !== 'object' || !m.id) return;
-
-          if (existingById.has(m.id)) {
-            const existing = existingById.get(m.id);
-            const localTime = (typeof existing.updatedAt === 'number') ? existing.updatedAt : 0;
-            const remoteTime = (typeof m.updatedAt === 'number') ? m.updatedAt : 0;
-            
-            if (remoteTime > localTime) {
-              Object.assign(existing, m);
-              updatedCount++;
-            }
-          } else {
-            chat.messages.push(m);
-            addedCount++;
-          }
-        });
-
-        chat.messages.sort((a, b) => {
-          const aTime = (typeof a.createdAt === 'number') ? a.createdAt : 0;
-          const bTime = (typeof b.createdAt === 'number') ? b.createdAt : 0;
-          if (aTime !== bTime) return aTime - bTime;
-          const aId = a.id || '';
-          const bId = b.id || '';
-          return aId.localeCompare(bId);
-        });
-        
-        const seen = new Set();
-        chat.messages = chat.messages.filter(m => {
-          if (!m || !m.id) return false;
-          if (seen.has(m.id)) return false;
-          seen.add(m.id);
-          return true;
-        });
-
-        chat.updatedAt = Date.now();
-        
-        const putReq = st.put(chat, chatId);
-        putReq.onsuccess = () => {
-          if (addedCount > 0 || updatedCount > 0) {
-            this.logger.log('info', `✅ Merged into ${chatId}: +${addedCount} new, ~${updatedCount} updated`);
+        request.onupgradeneeded = (e) => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains('keyval')) {
+            db.createObjectStore('keyval');
           }
         };
-        putReq.onerror = () => {
-          clearTimer();
-          reject(putReq.error);
-        };
-      };
-      
-      req.onerror = () => {
-        clearTimer();
-        reject(req.error);
-      };
-    });
-  }
-
-  async removeFromLocal(chatId, msgIds) {
-    const idb = await this.getIndexedDB();
-    
-    return new Promise((resolve, reject) => {
-      const tx = idb.transaction(['keyval'], 'readwrite');
-      const st = tx.objectStore('keyval');
-      const req = st.get(chatId);
-      
-      req.onsuccess = () => {
-        const chat = req.result;
-        if (!chat) {
-          resolve();
-          return;
-        }
-        
-        if (!Array.isArray(chat.messages)) {
-          resolve();
-          return;
-        }
-        
-        const idsToRemove = new Set(msgIds);
-        const before = chat.messages.length;
-        chat.messages = chat.messages.filter(m => 
-          m && (!m.id || !idsToRemove.has(m.id))
-        );
-        const removed = before - chat.messages.length;
-        
-        if (removed > 0) {
-          chat.updatedAt = Date.now();
-          const putReq = st.put(chat, chatId);
-          putReq.onsuccess = () => {
-            this.logger.log('info', `🗑️ Removed ${removed} messages from ${chatId}`);
-            resolve();
-          };
-          putReq.onerror = () => reject(putReq.error);
-        } else {
-          resolve();
-        }
-      };
-      
-      req.onerror = () => reject(req.error);
-    });
-  }
-
-  async getIndexedDB() {
-    if (this.dbInstance) {
-      try {
-        const tx = this.dbInstance.transaction(['keyval'], 'readonly');
-        tx.abort();
-        return this.dbInstance;
-      } catch (e) {
-        this.dbInstance = null;
-      }
+      });
     }
-
-    return new Promise((resolve, reject) => {
-      const request = indexedDB.open('keyval-store', 1);
-      
-      request.onsuccess = () => {
-        this.dbInstance = request.result;
-        
-        this.dbInstance.onversionchange = () => {
-          this.dbInstance.close();
-          this.dbInstance = null;
-        };
-        
-        this.dbInstance.onclose = () => {
-          this.dbInstance = null;
-        };
-        
-        resolve(request.result);
-      };
-      
-      request.onerror = () => {
-        reject(new Error('Failed to open IndexedDB'));
-      };
-      
-      request.onblocked = () => {
-        this.logger.log('warning', 'IndexedDB blocked');
-      };
-      
-      request.onupgradeneeded = (e) => {
-        const db = e.target.result;
-        if (!db.objectStoreNames.contains('keyval')) {
-          db.createObjectStore('keyval');
-        }
-      };
-    });
   }
-}
 
   /* ============================================================
-     4. CloudSyncApp
+     APP
   ============================================================ */
   class CloudSyncApp {
     constructor() {
@@ -953,58 +360,26 @@ class FirebaseService {
       this.config = new ConfigManager();
       this.firebase = new FirebaseService(this.config, this.logger);
       this.autoSyncInterval = null;
-      this.modalCleanupCallbacks = [];
-      this.lastSyncTime = null;
     }
     
     async initialize() {
-      this.logger.log('start', '🚀 Initializing Firebase Sync v2.7 (FIXED)');
+      this.logger.log('start', '🚀 Firebase Sync v3.0 SIMPLE');
       await this.waitForDOM();
       this.insertSyncButton();
 
       if (this.config.isConfigured()) {
         try {
           await this.firebase.initialize();
+          this.updateSyncStatus('success');
           
-          try {
-            await this.firebase.pushLocalChats();
-            this.lastSyncTime = Date.now();
-          } catch (e) {
-            this.logger.log('error', 'Initial sync failed', e);
-          }
-          
-          try {
-            const idb = await this.firebase.getIndexedDB();
-            const tx = idb.transaction(['keyval'], 'readonly');
-            const store = tx.objectStore('keyval');
-            
-            await new Promise((resolve) => {
-              store.getAllKeys().onsuccess = (e) => {
-                const keys = e.target.result.filter(k => 
-                  typeof k === 'string' && k.startsWith('CHAT_')
-                );
-                this.logger.log('info', `🎧 Attaching listeners to ${keys.length} chats`);
-                keys.forEach(chatId => {
-                  this.firebase.knownChatIds.add(chatId);
-                  this.firebase.attachListener(chatId);
-                });
-                resolve();
-              };
-            });
-          } catch (e) {
-            this.logger.log('error', 'Failed to attach listeners', e);
-          }
-          
-          this.firebase.startChatWatcher();
+          await this.firebase.syncAllChats();
           
           this.startAutoSync();
-          this.updateSyncStatus('success');
+          
         } catch (e) {
           this.logger.log('error', 'Init failed', e);
           this.updateSyncStatus('error');
         }
-      } else {
-        this.logger.log('info', 'Not configured');
       }
     }
     
@@ -1016,6 +391,7 @@ class FirebaseService {
     
     insertSyncButton() {
       if (document.querySelector('[data-element-id="workspace-tab-cloudsync"]')) return;
+      
       const style = document.createElement('style');
       style.textContent = `
         #sync-status-dot {
@@ -1042,7 +418,9 @@ class FirebaseService {
           </div>
           <span class="font-normal self-stretch text-center text-xs leading-4 md:leading-none">Sync</span>
         </span>`;
+      
       button.addEventListener('click', () => this.openSyncModal());
+      
       const chatButton = document.querySelector('button[data-element-id="workspace-tab-chat"]');
       if (chatButton?.parentNode) {
         chatButton.parentNode.insertBefore(button, chatButton.nextSibling);
@@ -1052,7 +430,11 @@ class FirebaseService {
     updateSyncStatus(status = 'success') {
       const dot = document.getElementById('sync-status-dot');
       if (!dot) return;
-      const colors = { success: '#22c55e', error: '#ef4444', warning: '#eab308', syncing: '#3b82f6' };
+      const colors = { 
+        success: '#22c55e', 
+        error: '#ef4444', 
+        syncing: '#3b82f6' 
+      };
       dot.style.backgroundColor = colors[status] || '#6b7280';
       dot.style.display = 'block';
     }
@@ -1066,175 +448,110 @@ class FirebaseService {
       const overlay = document.createElement('div');
       overlay.className = 'modal-overlay';
       overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999;';
+      
       const modal = document.createElement('div');
       modal.className = 'cloud-sync-modal';
-      modal.style.cssText = 'width:100%;max-width:32rem;background:#27272a;color:#fff;border-radius:0.5rem;padding:1rem;border:1px solid rgba(255,255,255,0.1);box-shadow:0 20px 25px -5px rgba(0,0,0,0.3);';
-      modal.innerHTML = this.getModalHTML();
-      overlay.appendChild(modal);
-      document.body.appendChild(overlay);
-      this.setupModalEventListeners(modal, overlay);
-    }
-    
-    getModalHTML() {
-      return `
-        <div class="text-white text-left text-sm">
-          <h3 class="text-center text-xl font-bold mb-3">Firebase Cloud Sync</h3>
+      modal.style.cssText = 'width:100%;max-width:32rem;background:#27272a;color:#fff;border-radius:0.5rem;padding:1.5rem;border:1px solid rgba(255,255,255,0.1);';
+      
+      modal.innerHTML = `
+        <div class="text-white text-sm">
+          <h3 class="text-center text-xl font-bold mb-4">Firebase Sync v3.0</h3>
           
-          <div class="mt-4 bg-zinc-800 px-3 py-2 rounded-lg border border-zinc-700">
-            <div class="flex items-center justify-between mb-2 cursor-pointer" id="firebase-config-header">
-              <label class="block text-sm font-medium text-zinc-300">Firebase Configuration</label>
-              <svg id="firebase-config-chevron" class="w-4 h-4 text-zinc-400 transform transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
-              </svg>
+          <div class="space-y-3 mb-4">
+            <div>
+              <label class="block text-xs text-zinc-400 mb-1">API Key</label>
+              <input id="fb-apiKey" type="password" style="width:100%;padding:8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff" value="${this.config.get('apiKey')}">
             </div>
-            <div id="firebase-config-content" class="space-y-2 hidden">
-              <div>
-                <label class="block text-xs text-zinc-400 mb-1">API Key</label>
-                <input id="fb-apiKey" type="password" style="width:100%;padding:6px 8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff;font-size:0.875rem" value="${this.config.get('apiKey')}">
-              </div>
-              <div>
-                <label class="block text-xs text-zinc-400 mb-1">Auth Domain</label>
-                <input id="fb-authDomain" style="width:100%;padding:6px 8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff;font-size:0.875rem" value="${this.config.get('authDomain')}">
-              </div>
-              <div>
-                <label class="block text-xs text-zinc-400 mb-1">Project ID</label>
-                <input id="fb-projectId" style="width:100%;padding:6px 8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff;font-size:0.875rem" value="${this.config.get('projectId')}">
-              </div>
-              <div>
-                <label class="block text-xs text-zinc-400 mb-1">Storage Bucket</label>
-                <input id="fb-storageBucket" style="width:100%;padding:6px 8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff;font-size:0.875rem" value="${this.config.get('storageBucket')}">
-              </div>
-              <div>
-                <label class="block text-xs text-zinc-400 mb-1">Sync Interval (seconds, min: 30)</label>
-                <input id="fb-syncInterval" type="number" min="30" style="width:100%;padding:6px 8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff;font-size:0.875rem" value="${this.config.get('syncInterval')}">
-              </div>
+            <div>
+              <label class="block text-xs text-zinc-400 mb-1">Auth Domain</label>
+              <input id="fb-authDomain" style="width:100%;padding:8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff" value="${this.config.get('authDomain')}">
+            </div>
+            <div>
+              <label class="block text-xs text-zinc-400 mb-1">Project ID</label>
+              <input id="fb-projectId" style="width:100%;padding:8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff" value="${this.config.get('projectId')}">
+            </div>
+            <div>
+              <label class="block text-xs text-zinc-400 mb-1">Storage Bucket</label>
+              <input id="fb-storageBucket" style="width:100%;padding:8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff" value="${this.config.get('storageBucket')}">
+            </div>
+            <div>
+              <label class="block text-xs text-zinc-400 mb-1">Auto-sync (minutes)</label>
+              <input id="fb-syncInterval" type="number" min="1" style="width:100%;padding:8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff" value="${this.config.get('syncInterval')/60}">
             </div>
           </div>
 
-          <div class="flex justify-between mt-4 gap-2">
-            <button id="save-settings" class="px-3 py-1.5 bg-blue-600 rounded text-sm hover:bg-blue-700">Save & Verify</button>
-            <div class="flex gap-2">
-              <button id="sync-now" class="px-3 py-1.5 bg-green-600 rounded text-sm hover:bg-green-700" ${this.config.isConfigured() ? '' : 'disabled'}>Sync Now</button>
-              <button id="close-modal" class="px-3 py-1.5 bg-red-600 rounded text-sm hover:bg-red-700">Close</button>
-            </div>
+          <div class="flex gap-2 mb-3">
+            <button id="save-settings" class="flex-1 px-4 py-2 bg-blue-600 rounded hover:bg-blue-700">Save</button>
+            <button id="sync-now" class="flex-1 px-4 py-2 bg-green-600 rounded hover:bg-green-700" ${this.config.isConfigured() ? '' : 'disabled'}>Sync Now</button>
+            <button id="close-modal" class="px-4 py-2 bg-zinc-700 rounded hover:bg-zinc-600">Close</button>
           </div>
           
-          <div id="action-msg" class="text-center text-zinc-400 mt-3"></div>
+          <div id="action-msg" class="text-center text-sm text-zinc-400"></div>
           
           <div class="text-center mt-4 pt-3 text-xs text-zinc-500 border-t border-zinc-700">
-            <span>Firebase Cloud Sync v2.7 FIXED for TypingMind</span>
+            v3.0 SIMPLE - Add ?log=true to URL for debug
           </div>
         </div>`;
-    }
-    
-    setupModalEventListeners(modal, overlay) {
-      const closeHandler = () => this.closeModal(overlay);
-      const saveHandler = () => this.saveSettings(modal);
-      const syncHandler = () => this.handleSyncNow(modal);
-
-      overlay.addEventListener('click', (e) => { if (e.target === overlay) closeHandler(); });
-      modal.querySelector('#close-modal').addEventListener('click', closeHandler);
-      modal.querySelector('#save-settings').addEventListener('click', saveHandler);
-      modal.querySelector('#sync-now').addEventListener('click', syncHandler);
-
-      const header = modal.querySelector('#firebase-config-header');
-      const content = modal.querySelector('#firebase-config-content');
-      const chevron = modal.querySelector('#firebase-config-chevron');
       
-      let isAnimating = false;
-      header.addEventListener('click', () => {
-        if (isAnimating) return;
-        isAnimating = true;
-        
-        const isHidden = content.classList.contains('hidden');
-        content.classList.toggle('hidden');
-        chevron.style.transform = isHidden ? 'rotate(180deg)' : 'rotate(0)';
-        
-        setTimeout(() => { isAnimating = false; }, 300);
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+      
+      overlay.addEventListener('click', (e) => { 
+        if (e.target === overlay) overlay.remove(); 
       });
-
-      this.modalCleanupCallbacks.push(() => {
-        overlay.removeEventListener('click', closeHandler);
-      });
+      
+      modal.querySelector('#close-modal').addEventListener('click', () => overlay.remove());
+      modal.querySelector('#save-settings').addEventListener('click', () => this.saveSettings(modal, overlay));
+      modal.querySelector('#sync-now').addEventListener('click', () => this.handleSyncNow(modal));
     }
     
-    closeModal(overlay) {
-      this.modalCleanupCallbacks.forEach(cb => cb());
-      this.modalCleanupCallbacks = [];
-      overlay?.remove();
-    }
-    
-    async saveSettings(modal) {
+    async saveSettings(modal, overlay) {
       const actionMsg = modal.querySelector('#action-msg');
-      const saveBtn = modal.querySelector('#save-settings');
-      saveBtn.disabled = true;
-      saveBtn.textContent = 'Verifying...';
-      actionMsg.textContent = 'Verifying configuration...';
-
       const get = id => modal.querySelector(id).value.trim();
+      
       const newConfig = {
         apiKey: get('#fb-apiKey'),
         authDomain: get('#fb-authDomain'),
         projectId: get('#fb-projectId'),
         storageBucket: get('#fb-storageBucket'),
-        syncInterval: Math.max(parseInt(get('#fb-syncInterval')), 30), 
+        syncInterval: parseInt(get('#fb-syncInterval')) * 60, 
       };
 
       if (!newConfig.apiKey || !newConfig.authDomain || !newConfig.projectId || !newConfig.storageBucket) {
-        actionMsg.textContent = '❌ Please fill all fields';
+        actionMsg.textContent = '❌ Fill all fields';
         actionMsg.style.color = '#ef4444';
-        saveBtn.disabled = false;
-        saveBtn.textContent = 'Save & Verify';
         return;
       }
 
       Object.keys(newConfig).forEach(k => this.config.set(k, newConfig[k]));
       this.config.save();
 
-      try {
-        await this.firebase.initialize();
-        actionMsg.textContent = '✅ Configuration saved! Page will reload...';
-        actionMsg.style.color = '#22c55e';
-        setTimeout(() => window.location.reload(), 1500);
-      } catch (e) {
-        this.logger.log('error', 'Verification failed', e.message);
-        actionMsg.textContent = `❌ Verification failed: ${e.message}`;
-        actionMsg.style.color = '#ef4444';
-        saveBtn.disabled = false;
-        saveBtn.textContent = 'Save & Verify';
-      }
+      actionMsg.textContent = '✅ Saved! Reloading...';
+      actionMsg.style.color = '#22c55e';
+      
+      setTimeout(() => window.location.reload(), 1000);
     }
     
     async handleSyncNow(modal) {
-      try {
-        if (!this.firebase.db) {
-          await this.firebase.initialize();
-        }
-      } catch (e) {
-        alert('Firebase init failed : ' + e.message);
-        return;
-      }
-
       const syncBtn = modal.querySelector('#sync-now');
       const actionMsg = modal.querySelector('#action-msg');
-      const original = syncBtn.textContent;
+      
       syncBtn.disabled = true;
-      syncBtn.textContent = 'Syncing…';
+      syncBtn.textContent = 'Syncing...';
       this.updateSyncStatus('syncing');
 
       try {
-        await this.firebase.pushLocalChats();
-        actionMsg.textContent = '✅ Sync completed!';
+        await this.firebase.syncAllChats();
+        actionMsg.textContent = '✅ Sync complete!';
         actionMsg.style.color = '#22c55e';
         this.updateSyncStatus('success');
-        this.lastSyncTime = Date.now();
       } catch (e) {
-        actionMsg.textContent = `❌ Sync failed: ${e.message}`;
+        actionMsg.textContent = `❌ ${e.message}`;
         actionMsg.style.color = '#ef4444';
         this.updateSyncStatus('error');
       } finally {
         setTimeout(() => {
-          syncBtn.textContent = original;
+          syncBtn.textContent = 'Sync Now';
           syncBtn.disabled = false;
         }, 2000);
       }
@@ -1242,37 +559,25 @@ class FirebaseService {
     
     startAutoSync() {
       if (this.autoSyncInterval) clearInterval(this.autoSyncInterval);
-      const interval = Math.max(this.config.get('syncInterval') * 1000, 30000); 
+      
+      const intervalMs = this.config.get('syncInterval') * 1000;
       
       this.autoSyncInterval = setInterval(async () => {
-        if (this.firebase.isSyncing) {
-          this.logger.log('info', '⏸️ Auto-sync skipped (already syncing)');
-          return;
-        }
+        if (this.firebase.isSyncing) return;
         
-        if (this.lastSyncTime) {
-          const timeSinceLastSync = Date.now() - this.lastSyncTime;
-          if (timeSinceLastSync < interval) {
-            this.logger.log('info', `⏸️ Auto-sync skipped (last sync ${Math.round(timeSinceLastSync/1000)}s ago)`);
-            return;
-          }
-        }
-        
-        this.logger.log('info', '⏰ Auto-sync triggered');
+        this.logger.log('info', '⏰ Auto-sync...');
         this.updateSyncStatus('syncing');
         
         try {
-          await this.firebase.pushLocalChats();
+          await this.firebase.syncAllChats();
           this.updateSyncStatus('success');
-          this.lastSyncTime = Date.now();
-          this.logger.log('success', '✅ Auto-sync completed');
         } catch (e) {
-          this.logger.log('error', 'Auto-sync failed', e.message);
+          this.logger.log('error', 'Auto-sync failed', e);
           this.updateSyncStatus('error');
         }
-      }, interval);
+      }, intervalMs);
       
-      this.logger.log('success', `⏰ Auto-sync started (every ${interval / 1000}s, min interval respected)`);
+      this.logger.log('success', `Auto-sync every ${intervalMs/1000}s`);
     }
   }
 
