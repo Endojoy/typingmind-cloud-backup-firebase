@@ -170,7 +170,14 @@ class FirebaseService {
       store.openCursor().onsuccess = e => {
         const cur = e.target.result;
         if (!cur) {                        
-          Promise.all(jobs).then(resolve).catch(reject);
+          (async () => {
+            try {
+              for (const job of jobs) await job;   
+              resolve();
+            } catch (e) {
+              reject(e);
+            }
+          })();
           return;
         }
 
@@ -210,8 +217,8 @@ class FirebaseService {
       typeof value === 'boolean'
     ) return value;
 
-    if (value instanceof firebase.firestore.Timestamp) return value;
-    if (value instanceof Date) return value.toISOString();
+    if (value instanceof firebase.firestore.Timestamp) return value.toMillis();
+    if (value instanceof Date) return value.getTime();
 
     if (Array.isArray(value)) {
       const arr = value
@@ -237,6 +244,14 @@ class FirebaseService {
     return `${role}_${t}`;
   }
 
+  static chunk(array, size = 400) {
+    const chunks = [];
+    for (let i = 0; i < array.length; i += size) {
+      chunks.push(array.slice(i, i + size));
+    }
+    return chunks;
+  }
+
 
   async flagLocalChatId(chatId, id, msg) {
     const idb = await this.getIndexedDB();
@@ -257,41 +272,49 @@ class FirebaseService {
 
   async syncChatRecord(chatId, localData) {
     const docRef   = this.db.collection('chats').doc(chatId);
+
     const snap     = await docRef.get();
     const remoteUp = snap.exists ? snap.data().updatedAt || 0 : 0;
 
     if (localData.updatedAt > remoteUp) {
       await docRef.set(
-        FirebaseService.sanitizeForFirestore({ updatedAt: Date.now() }),
+        FirebaseService.sanitizeForFirestore({
+          updatedAt : Date.now(),                      
+          title     : localData.title || 'Untitled'   
+        }),
         { merge: true }
       );
     }
 
-    const batch     = this.db.batch();
     const srcMsgs   = localData.messages || [];
     const cleanMsgs = srcMsgs
-      .map(m => FirebaseService.sanitizeForFirestore({ ...m }))
-      .filter(Boolean);
+      .map(m => FirebaseService.sanitizeForFirestore({ ...m }))  
+      .filter(Boolean);                                          
 
-    let autoIndex = 0;
+    const chunks = FirebaseService.chunk(cleanMsgs, 400);
 
-    for (const msg of cleanMsgs) {
-      const id = msg.id ? String(msg.id)
-                        : FirebaseService.stableId(msg);
-      const firstTime = !msg.id;
-      msg.id = id;
+    for (const chunk of chunks) {
+      const batch = this.db.batch();
 
-      const mRef = docRef.collection('messages').doc(id);
-      batch.set(mRef, msg, { merge: true });
+      for (const msg of chunk) {
+        const id     = msg.id ? String(msg.id)
+                              : FirebaseService.stableId(msg);
+        const hadId  = !!msg.id;          
+        msg.id       = id;              
 
-      if (firstTime) {
-        await this.flagLocalChatId(chatId, id, msg);
+        const mRef   = docRef.collection('messages').doc(id);
+        batch.set(mRef, msg, { merge: true });
+
+        
+        if (!hadId) await this.flagLocalChatId(chatId, id, msg);
       }
+
+      await batch.commit();              
     }
-    if (cleanMsgs.length) await batch.commit();
 
     this.logger.log('success',
-      `Pushed ${chatId} (${cleanMsgs.length} msgs, ${autoIndex} auto-id)`);
+      `Pushed ${chatId} (${cleanMsgs.length} msgs, ${chunks.length} batchs)`);
+
     this.attachListener(chatId);
   }
 
@@ -330,6 +353,9 @@ class FirebaseService {
         }
       });
       chat.updatedAt = Date.now();
+      chat.messages = Array.from(
+        new Map(chat.messages.map(msg => [msg.id, msg])).values()
+      );
       st.put(chat, chatId);
       this.logger.log('info', `Injected ${msgs.length} messages into ${chatId}`);
     };
@@ -361,7 +387,17 @@ class FirebaseService {
 
       if (this.config.isConfigured()) {
         try {
-          await this.firebase.initialize();          
+          await this.firebase.initialize();     
+          this.firebase.db.collection('chats')
+            .orderBy('updatedAt', 'desc')          
+            .limit(50)                             
+            .onSnapshot(snap => {
+              snap.docChanges().forEach(c => {
+                const chatId = c.doc.id;
+                this.firebase.injectIntoLocal(chatId, []);
+                this.firebase.attachListener(chatId);
+              });
+          });     
           console.log('init ok');                    
           await this.firebase.pushLocalChats();      
           this.startAutoSync();
