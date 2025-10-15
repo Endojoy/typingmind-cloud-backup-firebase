@@ -142,18 +142,17 @@ class FirebaseService {
         : firebase.initializeApp(cfg);         
     }
 
-    firebase.firestore().settings({
-      experimentalForceLongPolling: true,
-      useFetchStreams            : false
-    });
+    if (!this.db) {
+      this.db      = firebase.firestore();   
+      this.storage = firebase.storage();
 
-    this.db      = firebase.firestore(this.app);
-    this.storage = firebase.storage(this.app);
+      this.db.settings({
+        experimentalForceLongPolling: true,
+        useFetchStreams            : false
+      });
 
-    try { await this.db.enablePersistence(); } catch {}
-
-    console.log('init ok');               
-    this.logger.log('success', 'Firebase initialised');
+      try { await this.db.enableIndexedDbPersistence(); } catch {}
+    }
   }
 
   async pushLocalChats() {
