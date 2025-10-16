@@ -1,5 +1,5 @@
 /*──────────────────────────────────────────────────────────────
-  TypingMind – Firebase Cloud-Sync v3.6 FINAL (Oct-2025)
+  TypingMind – Firebase Cloud-Sync v3.7 FINAL (Oct-2025)
 ──────────────────────────────────────────────────────────────*/
 if (window.typingMindFirebaseSync) {
   console.log("Firebase Sync already loaded");
@@ -638,14 +638,33 @@ if (window.typingMindFirebaseSync) {
     
     setupAutoRefresh() {
       window.addEventListener('tm-sync-refresh', (e) => {
-        this.logger.log('success', `✅ ${e.detail.chatIds.length} chats synced silently`);
+        const count = e.detail.chatIds.length;
+        this.logger.log('success', `Refreshing UI for ${count} synced chats`);
         
-        this.showSyncNotification(e.detail.chatIds.length);
+        this.showSyncNotification(count);
+        
+        setTimeout(() => {
+          this.triggerSoftRefresh();
+        }, 500);
       });
     }
 
+    triggerSoftRefresh() {
+      try {
+        document.dispatchEvent(new Event('visibilitychange', { bubbles: true }));
+        window.dispatchEvent(new Event('focus'));
+        this.logger.log('success', 'Soft refresh triggered');
+      } catch (e) {
+        this.logger.log('error', 'Soft refresh failed', e.message);
+      }
+    }
+
     showSyncNotification(count) {
+      const existingNotif = document.querySelector('.tm-sync-notification');
+      if (existingNotif) existingNotif.remove();
+
       const notif = document.createElement('div');
+      notif.className = 'tm-sync-notification';
       notif.style.cssText = `
         position: fixed;
         bottom: 20px;
@@ -655,11 +674,13 @@ if (window.typingMindFirebaseSync) {
         padding: 12px 20px;
         border-radius: 8px;
         font-size: 14px;
+        font-weight: 500;
         z-index: 10000;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
         animation: slideIn 0.3s ease-out;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       `;
-      notif.textContent = `✅ ${count} chat${count > 1 ? 's' : ''} synced`;
+      notif.textContent = `✓ ${count} chat${count > 1 ? 's' : ''} synced`;
       
       const style = document.createElement('style');
       style.textContent = `
@@ -672,7 +693,10 @@ if (window.typingMindFirebaseSync) {
           to { transform: translateX(400px); opacity: 0; }
         }
       `;
-      document.head.appendChild(style);
+      if (!document.querySelector('style[data-tm-sync]')) {
+        style.setAttribute('data-tm-sync', 'true');
+        document.head.appendChild(style);
+      }
       
       document.body.appendChild(notif);
       
@@ -681,9 +705,9 @@ if (window.typingMindFirebaseSync) {
         setTimeout(() => notif.remove(), 300);
       }, 3000);
     }
-        
+    
     async initialize() {
-      this.logger.log('start', 'Firebase Sync v3.6 FINAL');
+      this.logger.log('start', 'Firebase Sync v3.7 FINAL');
       await this.waitForDOM();
       this.insertSyncButton();
 
@@ -785,7 +809,7 @@ if (window.typingMindFirebaseSync) {
       
       modal.innerHTML = `
         <div class="text-white text-sm">
-          <h3 class="text-center text-xl font-bold mb-4">Firebase Sync v3.6</h3>
+          <h3 class="text-center text-xl font-bold mb-4">Firebase Sync v3.7</h3>
           
           <div class="bg-blue-900/30 border border-blue-700 rounded p-3 mb-4 text-xs">
             <strong>Setup:</strong><br>
@@ -839,7 +863,7 @@ if (window.typingMindFirebaseSync) {
           <div id="action-msg" class="text-center text-sm text-zinc-400"></div>
           
           <div class="text-center mt-4 pt-3 text-xs text-zinc-500 border-t border-zinc-700">
-            v3.6 FINAL - Device: ${this.firebase.deviceId.substr(0, 15)}... - Add ?log=true for debug
+            v3.7 FINAL - Device: ${this.firebase.deviceId.substr(0, 15)}... - Add ?log=true for debug
           </div>
         </div>`;
       
