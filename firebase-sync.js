@@ -1,5 +1,5 @@
 /*──────────────────────────────────────────────────────────────
-  TypingMind – Firebase Cloud-Sync  v2.7  (Oct-2025) - FIXED
+  TypingMind – Firebase Cloud-Sync v1.0 (Oct-2025)
 ──────────────────────────────────────────────────────────────*/
 if (window.typingMindFirebaseSync) {
   console.log("Firebase Sync already loaded");
@@ -7,7 +7,7 @@ if (window.typingMindFirebaseSync) {
   window.typingMindFirebaseSync = true;
 
   /* ============================================================
-     1. ConfigManager
+     CONFIGURATION
   ============================================================ */
   class ConfigManager {
     constructor() {
@@ -19,7 +19,8 @@ if (window.typingMindFirebaseSync) {
         authDomain: '',
         projectId: '',
         storageBucket: '',
-        syncInterval: 30, 
+        syncInterval: 60,
+        workspaceId: '',
       };
       const stored = {};
       const keyMap = {
@@ -28,11 +29,12 @@ if (window.typingMindFirebaseSync) {
         projectId: 'tcs_fb_projectId',
         storageBucket: 'tcs_fb_storageBucket',
         syncInterval: 'tcs_fb_syncInterval',
+        workspaceId: 'tcs_fb_workspaceId',
       };
       Object.keys(defaults).forEach(key => {
         const val = localStorage.getItem(keyMap[key]);
         if (val !== null) {
-          stored[key] = key === 'syncInterval' ? parseInt(val) || 30 : val;
+          stored[key] = key === 'syncInterval' ? parseInt(val) || 60 : val;
         }
       });
       return { ...defaults, ...stored };
@@ -46,6 +48,7 @@ if (window.typingMindFirebaseSync) {
         projectId: 'tcs_fb_projectId',
         storageBucket: 'tcs_fb_storageBucket',
         syncInterval: 'tcs_fb_syncInterval',
+        workspaceId: 'tcs_fb_workspaceId',
       };
       Object.keys(this.config).forEach(key => {
         const storageKey = keyMap[key];
@@ -55,13 +58,18 @@ if (window.typingMindFirebaseSync) {
       });
     }
     isConfigured() {
-      return !!(this.config.apiKey && this.config.authDomain &&
-                this.config.projectId && this.config.storageBucket);
+      return !!(
+        this.config.apiKey && 
+        this.config.authDomain &&
+        this.config.projectId && 
+        this.config.storageBucket &&
+        this.config.workspaceId
+      );
     }
   }
 
   /* ============================================================
-     2. Logger
+     LOGGER
   ============================================================ */
   class Logger {
     constructor() {
@@ -75,936 +83,898 @@ if (window.typingMindFirebaseSync) {
       const icon = icons[type] || 'ℹ️';
       console.log(`${icon} [${timestamp}] ${message}`, data || '');
     }
-    setEnabled(enabled) {
-      this.enabled = enabled;
-      const url = new URL(window.location);
-      if (enabled) url.searchParams.set('log', 'true');
-      else url.searchParams.delete('log');
-      window.history.replaceState({}, '', url);
-    }
   }
 
-/* ============================================================
-   3. FirebaseService 
-============================================================ */
-class FirebaseService {
-  constructor(config, logger) {
-    this.config = config;
-    this.logger = logger;
-    this.app = null;
-    this.db = null;
-    this.storage = null;
-    this.listeners = [];
-    this.sdkLoaded = false;
-    this.isSyncing = false;
-    this.dbInstance = null;
-    this.mergeLocks = new Map();
-    this.syncLocks = new Set();
-    this.watcherInterval = null;
-    this.knownChatIds = new Set(); 
-    this.lastFullSync = 0; 
-    this.listenerIgnoreNext = new Map(); 
-    
-    window.addEventListener('beforeunload', () => {
-      if (this.watcherInterval) clearInterval(this.watcherInterval);
-      this.listeners.forEach(l => {
-        try { l.unsubscribe(); } catch {}
-      });
-    });
-  }
-
-  async loadSDK() {
-    if (this.sdkLoaded) return;
-
-    const existing = document.querySelector('script#firebase-compat');
-    if (existing) {
-      await this.waitForFirebaseGlobal();
-      this.sdkLoaded = true;
-      this.logger.log('success', 'Firebase SDK already present');
-      return;
+  /* ============================================================
+     FIREBASE SERVICE
+  ============================================================ */
+  class FirebaseService {
+    constructor(config, logger, cloudSyncApp = null) {
+      this.config = config;
+      this.logger = logger;
+      this.cloudSyncApp = cloudSyncApp;
+      this.app = null;
+      this.db = null;
+      this.deviceId = this.getDeviceId();
+      this.userId = null;
+      this.sdkLoaded = false;
+      this.isSyncing = false;
+      this.lastSyncTimestamps = {};
     }
 
-    const SRC = 'https://unpkg.com/firebase@9.22.2/firebase-compat.js';
-
-    await this.loadScript(SRC, {
-      id: 'firebase-compat',
-      crossorigin: 'anonymous'
-    });
-
-    await this.waitForFirebaseGlobal();
-
-    this.sdkLoaded = true;
-    this.logger.log('success', 'Firebase SDK 9.22.2 loaded');
-  }
-
-  waitForFirebaseGlobal() {
-    return new Promise((resolve, reject) => {
-      const max = 20;
-      let attempts = 0;
-      const timer = setInterval(() => {
-        if (window.firebase) {
-          clearInterval(timer);
-          return resolve();
-        }
-        if (++attempts > max) {
-          clearInterval(timer);
-          return reject(new Error('firebase global not found'));
-        }
-      }, 500);
-    });
-  }
-
-  loadScript(src, attrs = {}) {
-    return new Promise((ok, err) => {
-      const s = document.createElement('script');
-      s.src = src;
-      s.async = true;
-      Object.entries(attrs).forEach(([k, v]) => s.setAttribute(k, v));
-      s.onload = ok;
-      s.onerror = () => err(new Error(`Failed loading ${src}`));
-      document.head.appendChild(s);
-    });
-  }
-
-  async initialize() {
-    await this.loadSDK();
-
-    if (!this.app) {
-      const cfg = {
-        apiKey: this.config.get('apiKey'),
-        authDomain: this.config.get('authDomain'),
-        projectId: this.config.get('projectId'),
-        storageBucket: this.config.get('storageBucket')
-      };
-      this.app = firebase.apps.length
-        ? firebase.app()
-        : firebase.initializeApp(cfg);
-    }
-
-    if (!firebase.auth().currentUser) {
-      await firebase.auth().signInAnonymously();
-      this.logger.log('success', 'Signed-in anonymously');
-    }
-
-    if (!this.db) {
-      this.db = firebase.firestore();
-      this.storage = firebase.storage();
-
-      this.db.settings({
-        experimentalForceLongPolling: true,
-        useFetchStreams: false
-      });
-
-      try {
-        await this.db.enablePersistence({ synchronizeTabs: true });
-      } catch (_) {}
-    }
-    
-    this.listeners.forEach(l => {
-      try { l.unsubscribe(); } catch {}
-    });
-    this.listeners = [];
-    this.knownChatIds.clear();
-  }
-
-  startChatWatcher() {
-    if (this.watcherInterval) return;
-    
-    this.watcherInterval = setInterval(async () => {
-      try {
-        const idb = await this.getIndexedDB();
-        const tx = idb.transaction(['keyval'], 'readonly');
-        const store = tx.objectStore('keyval');
-        
-        await new Promise((resolve) => {
-          store.getAllKeys().onsuccess = (e) => {
-            const keys = e.target.result.filter(k => 
-              typeof k === 'string' && k.startsWith('CHAT_')
-            );
-            
-            keys.forEach(chatId => {
-              if (!this.knownChatIds.has(chatId)) {
-                this.logger.log('info', `📝 New chat detected: ${chatId}`);
-                this.knownChatIds.add(chatId);
-                this.attachListener(chatId);
-              }
-            });
-            
-            resolve();
-          };
-        });
-      } catch (e) {
-        this.logger.log('error', 'Chat watcher error', e);
+    getDeviceId() {
+      let id = localStorage.getItem('tcs_fb_deviceId');
+      if (!id) {
+        id = 'device_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
+        localStorage.setItem('tcs_fb_deviceId', id);
       }
-    }, 10000); 
-    
-    this.logger.log('info', '👀 Chat watcher started (checking every 10s)');
-  }
-
-  async pushLocalChats() {
-    if (this.isSyncing) {
-      this.logger.log('warning', 'Sync already in progress, skipping');
-      return;
+      return id;
     }
 
-    this.isSyncing = true;
-    const now = Date.now();
-
-    try {
-      if (!this.db) {
-        throw new Error('Firebase not initialized');
+    getDeletedChats() {
+      try {
+        const stored = localStorage.getItem('tcs_fb_deletedChats');
+        return stored ? JSON.parse(stored) : [];
+      } catch {
+        return [];
       }
+    }
 
-      const idb = await this.getIndexedDB();
-      const tx = idb.transaction(['keyval'], 'readonly');
-      const store = tx.objectStore('keyval');
+    markChatAsDeleted(chatId) {
+      const deleted = this.getDeletedChats();
+      if (!deleted.includes(chatId)) {
+        deleted.push(chatId);
+        localStorage.setItem('tcs_fb_deletedChats', JSON.stringify(deleted));
+        this.logger.log('info', `Marked as deleted: ${chatId}`);
+      }
+    }
+
+    isChatDeleted(chatId) {
+      return this.getDeletedChats().includes(chatId);
+    }
+
+    async downloadDeletedChatIds() {
+      const workspaceId = this.config.get('workspaceId');
       
-      const chatsToSync = [];
-      const recentThreshold = now - (7 * 24 * 60 * 60 * 1000); 
+      try {
+        const snapshot = await this.db
+          .collection('workspaces')
+          .doc(workspaceId)
+          .collection('deletions')
+          .get();
+        
+        return snapshot.docs.map(doc => doc.id);
+      } catch (error) {
+        this.logger.log('error', 'Failed to download tombstones', error.message);
+        return [];
+      }
+    }
+
+    async loadSDK() {
+      if (this.sdkLoaded) return;
+      const existing = document.querySelector('script#firebase-compat');
+      if (existing) {
+        await this.waitForFirebaseGlobal();
+        this.sdkLoaded = true;
+        return;
+      }
+
+      const script = document.createElement('script');
+      script.id = 'firebase-compat';
+      script.src = 'https://unpkg.com/firebase@9.22.2/firebase-compat.js';
+      script.crossOrigin = 'anonymous';
       
       await new Promise((resolve, reject) => {
-        store.openCursor().onsuccess = (e) => {
-          const cur = e.target.result;
-          if (!cur) {
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.appendChild(script);
+      });
+
+      await this.waitForFirebaseGlobal();
+      this.sdkLoaded = true;
+      this.logger.log('success', 'Firebase SDK loaded');
+    }
+
+    waitForFirebaseGlobal() {
+      return new Promise((resolve, reject) => {
+        let attempts = 0;
+        const timer = setInterval(() => {
+          if (window.firebase) {
+            clearInterval(timer);
             resolve();
+          }
+          if (++attempts > 20) {
+            clearInterval(timer);
+            reject(new Error('Firebase not found'));
+          }
+        }, 500);
+      });
+    }
+
+    async initialize() {
+      await this.loadSDK();
+
+      if (!this.app) {
+        const cfg = {
+          apiKey: this.config.get('apiKey'),
+          authDomain: this.config.get('authDomain'),
+          projectId: this.config.get('projectId'),
+          storageBucket: this.config.get('storageBucket')
+        };
+        this.app = firebase.apps.length ? firebase.app() : firebase.initializeApp(cfg);
+      }
+
+      if (!firebase.auth().currentUser) {
+        try {
+          this.logger.log('info', 'Anonymous sign-in...');
+          const result = await firebase.auth().signInAnonymously();
+          this.userId = result.user.uid;
+          this.logger.log('success', `Signed in: ${this.userId.substr(0, 8)}...`);
+        } catch (error) {
+          if (error.code === 'auth/operation-not-allowed') {
+            throw new Error('⚠️ Enable Anonymous auth in Firebase Console');
+          }
+          if (error.code === 'auth/api-not-enabled' || error.message.includes('identity-toolkit-api')) {
+            throw new Error('⏳ Firebase API not ready. Wait 10min or clear cache (Ctrl+Shift+R)');
+          }
+          throw error;
+        }
+      } else {
+        this.userId = firebase.auth().currentUser.uid;
+        this.logger.log('info', `Already signed in: ${this.userId.substr(0, 8)}...`);
+      }
+
+      if (!this.db) {
+        this.db = firebase.firestore();
+        try {
+          await this.db.enablePersistence({ synchronizeTabs: true });
+        } catch {}
+      }
+
+      this.logger.log('success', `Device: ${this.deviceId.substr(0, 15)}...`);
+      this.logger.log('success', `Workspace: ${this.config.get('workspaceId')}`);
+    }
+
+    validateTimestamp(value, fieldName = 'timestamp') {
+      if (value && typeof value.toMillis === 'function') {
+        try {
+          const millis = value.toMillis();
+          if (this.isValidMillis(millis)) return value;
+        } catch (e) {}
+      }
+
+      if (typeof value === 'number' && this.isValidMillis(value)) {
+        return firebase.firestore.Timestamp.fromMillis(value);
+      }
+
+      if (value instanceof Date) {
+        const time = value.getTime();
+        if (this.isValidMillis(time)) {
+          return firebase.firestore.Timestamp.fromDate(value);
+        }
+      }
+
+      if (typeof value === 'string') {
+        const parsed = Date.parse(value);
+        if (!isNaN(parsed) && this.isValidMillis(parsed)) {
+          return firebase.firestore.Timestamp.fromMillis(parsed);
+        }
+      }
+
+      this.logger.log('warning', `Invalid ${fieldName}, using now`);
+      return firebase.firestore.Timestamp.now();
+    }
+
+    isValidMillis(millis) {
+      const MIN_MILLIS = -30610224000000;
+      const MAX_MILLIS = 253402300799999;
+      return (
+        typeof millis === 'number' &&
+        isFinite(millis) &&
+        !isNaN(millis) &&
+        millis >= MIN_MILLIS &&
+        millis <= MAX_MILLIS
+      );
+    }
+
+    async syncAllChats() {
+      if (this.isSyncing) {
+        this.logger.log('warning', 'Already syncing');
+        return;
+      }
+
+      this.isSyncing = true;
+      this.logger.log('start', 'Smart sync with deletion tracking...');
+
+      try {
+        const remoteDeletedIds = await this.downloadDeletedChatIds();
+        this.logger.log('info', `Remote deletions: ${remoteDeletedIds.length}`);
+
+        for (const deletedId of remoteDeletedIds) {
+          if (!this.isChatDeleted(deletedId)) {
+            this.markChatAsDeleted(deletedId);
+          }
+        }
+
+        const localChats = await this.getAllLocalChats();
+        const localChatIds = localChats.map(c => c.id);
+        this.logger.log('info', `Local: ${localChats.length} chats`);
+
+        const lastKnownIds = this.getLastKnownChatIds();
+        const deletedLocally = lastKnownIds.filter(id => 
+          !localChatIds.includes(id) && !this.isChatDeleted(id)
+        );
+
+        if (deletedLocally.length > 0) {
+          this.logger.log('warning', `Detected ${deletedLocally.length} locally deleted chats`);
+          
+          for (const chatId of deletedLocally) {
+            try {
+              await this.deleteRemoteChat(chatId);
+              this.markChatAsDeleted(chatId);
+              this.logger.log('success', `Deleted from Firebase: ${chatId}`);
+            } catch (error) {
+              this.logger.log('error', `Failed to delete ${chatId}`, error.message);
+            }
+          }
+        }
+
+        const toDeleteLocally = localChatIds.filter(id => 
+          remoteDeletedIds.includes(id)
+        );
+
+        if (toDeleteLocally.length > 0) {
+          this.logger.log('warning', `Remote deleted (tombstones): ${toDeleteLocally.length} chats`);
+          
+          for (const chatId of toDeleteLocally) {
+            try {
+              await this.deleteLocalChat(chatId);
+              this.logger.log('success', `Deleted locally: ${chatId}`);
+            } catch (error) {
+              this.logger.log('error', `Failed to delete locally ${chatId}`, error.message);
+            }
+          }
+
+          const updatedLocalChats = await this.getAllLocalChats();
+          localChats.length = 0;
+          localChats.push(...updatedLocalChats);
+
+          if (this.cloudSyncApp) {
+            this.cloudSyncApp.showSyncNotification(toDeleteLocally.length, 'deleted');
+            setTimeout(() => {
+              this.cloudSyncApp.triggerSoftRefresh();
+            }, 500);
+          }
+        }
+
+        const currentLocalIds = localChats.map(c => c.id);
+        this.saveLastKnownChatIds(currentLocalIds);
+
+        const chatsToUpload = localChats.filter(chat => {
+          if (remoteDeletedIds.includes(chat.id)) {
+            this.logger.log('warning', `Skip chat with tombstone: ${chat.id}`);
+            this.markChatAsDeleted(chat.id);
+            return false;
+          }
+          
+          if (this.isChatDeleted(chat.id)) {
+            this.logger.log('warning', `Skip deleted chat: ${chat.id}`);
+            return false;
+          }
+          
+          const lastSync = this.lastSyncTimestamps[chat.id] || 0;
+          const chatUpdated = chat.data.updatedAt || 0;
+          const chatUpdatedMs = typeof chatUpdated === 'string' ? Date.parse(chatUpdated) : chatUpdated;
+          return chatUpdatedMs > lastSync;
+        });
+
+        this.logger.log('info', `To upload: ${chatsToUpload.length} chats`);
+
+        let uploadedCount = 0;
+        for (const chat of chatsToUpload) {
+          try {
+            await this.uploadChat(chat);
+            this.lastSyncTimestamps[chat.id] = Date.now();
+            uploadedCount++;
+          } catch (error) {
+            this.logger.log('error', `Upload failed: ${chat.id}`, error.message);
+          }
+        }
+
+        if (uploadedCount > 0) {
+          this.logger.log('success', `Uploaded ${uploadedCount} chats`);
+          this.saveLastSyncTimestamps();
+        }
+
+        const remoteChats = await this.downloadAllChats();
+        this.logger.log('info', `Remote: ${remoteChats.length} chats`);
+
+        let mergedCount = 0;
+        const mergedChatIds = [];
+        
+        for (const remoteChat of remoteChats) {
+          if (this.isChatDeleted(remoteChat.id)) {
+            this.logger.log('warning', `Skip merging deleted chat: ${remoteChat.id}`);
+            continue;
+          }
+
+          try {
+            const wasMerged = await this.mergeRemoteChat(remoteChat);
+            if (wasMerged) {
+              mergedCount++;
+              mergedChatIds.push(remoteChat.id);
+            }
+          } catch (error) {
+            this.logger.log('error', `Merge failed: ${remoteChat.id}`, error.message);
+          }
+        }
+
+        if (mergedCount > 0) {
+          this.logger.log('success', `Merged ${mergedCount} chats`);
+          
+          if (this.cloudSyncApp) {
+            this.cloudSyncApp.showSyncNotification(mergedCount, 'synced');
+            setTimeout(() => {
+              this.cloudSyncApp.triggerSoftRefresh();
+            }, 500);
+          }
+        }
+
+        this.logger.log('success', 'SYNC COMPLETE');
+
+      } catch (error) {
+        this.logger.log('error', 'Sync failed', error);
+        throw error;
+      } finally {
+        this.isSyncing = false;
+      }
+    }
+
+    saveLastSyncTimestamps() {
+      try {
+        localStorage.setItem('tcs_fb_lastSyncTimestamps', JSON.stringify(this.lastSyncTimestamps));
+      } catch (e) {
+        this.logger.log('warning', 'Failed to save sync timestamps');
+      }
+    }
+
+    getLastKnownChatIds() {
+      try {
+        const stored = localStorage.getItem('tcs_fb_lastKnownChatIds');
+        return stored ? JSON.parse(stored) : [];
+      } catch {
+        return [];
+      }
+    }
+
+    saveLastKnownChatIds(chatIds) {
+      try {
+        localStorage.setItem('tcs_fb_lastKnownChatIds', JSON.stringify(chatIds));
+      } catch (e) {
+        this.logger.log('warning', 'Failed to save known chat IDs');
+      }
+    }
+
+    async deleteRemoteChat(chatId) {
+      const workspaceId = this.config.get('workspaceId');
+      const batch = this.db.batch();
+      
+      const chatRef = this.db
+        .collection('workspaces')
+        .doc(workspaceId)
+        .collection('chats')
+        .doc(chatId);
+      
+      batch.delete(chatRef);
+      
+      const deletionRef = this.db
+        .collection('workspaces')
+        .doc(workspaceId)
+        .collection('deletions')
+        .doc(chatId);
+      
+      batch.set(deletionRef, {
+        deletedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        deletedBy: this.deviceId
+      });
+      
+      await batch.commit();
+      
+      this.logger.log('info', `Deleted from Firebase + tombstone: ${chatId}`);
+    }
+
+    async deleteLocalChat(chatId) {
+      const chatKey = `CHAT_${chatId}`;
+      const idb = await this.getIndexedDB();
+
+      return new Promise((resolve, reject) => {
+        const tx = idb.transaction(['keyval'], 'readwrite');
+        const store = tx.objectStore('keyval');
+        
+        const deleteReq = store.delete(chatKey);
+        
+        deleteReq.onsuccess = () => {
+          this.logger.log('info', `Deleted locally: ${chatId}`);
+          resolve();
+        };
+        
+        deleteReq.onerror = reject;
+      });
+    }
+
+    loadLastSyncTimestamps() {
+      try {
+        const stored = localStorage.getItem('tcs_fb_lastSyncTimestamps');
+        if (stored) {
+          this.lastSyncTimestamps = JSON.parse(stored);
+        }
+      } catch (e) {
+        this.lastSyncTimestamps = {};
+      }
+    }
+
+    async getAllLocalChats() {
+      const idb = await this.getIndexedDB();
+      return new Promise((resolve, reject) => {
+        const tx = idb.transaction(['keyval'], 'readonly');
+        const store = tx.objectStore('keyval');
+        const chats = [];
+
+        store.openCursor().onsuccess = (e) => {
+          const cursor = e.target.result;
+          if (!cursor) {
+            resolve(chats);
             return;
           }
 
-          const k = cur.key;
-          if (typeof k === 'string' && k.startsWith('CHAT_')) {
-            const value = cur.value;
-            
-            const shouldSync = 
-              (this.lastFullSync === 0) || 
-              !value.syncedAt || 
-              (value.updatedAt && value.updatedAt > recentThreshold) || 
-              (value.syncedAt && value.updatedAt > value.syncedAt); 
-            
-            if (shouldSync) {
-              chatsToSync.push({ 
-                key: k, 
-                value: value
-              });
-            }
+          const key = cursor.key;
+          if (typeof key === 'string' && key.startsWith('CHAT_')) {
+            const chat = cursor.value;
+            chats.push({
+              id: key.replace('CHAT_', ''),
+              data: chat
+            });
           }
-          cur.continue();
+          cursor.continue();
         };
+
         store.openCursor().onerror = reject;
       });
+    }
 
-      this.logger.log('info', `🔄 Syncing ${chatsToSync.length} chats (${this.lastFullSync === 0 ? 'FULL' : 'INCREMENTAL'})...`);
+    async uploadChat(chat) {
+      const workspaceId = this.config.get('workspaceId');
       
-      for (const { key, value } of chatsToSync) {
-        const normalized = FirebaseService.normalizeChat(value, key);
-        await this.syncChatRecord(key, normalized);
-        this.knownChatIds.add(key); 
-      }
+      const docRef = this.db
+        .collection('workspaces')
+        .doc(workspaceId)
+        .collection('chats')
+        .doc(chat.id);
+      
+      const createdAtValue = chat.data.createdAt;
+      const updatedAtValue = chat.data.updatedAt;
+      
+      const createdAt = this.validateTimestamp(createdAtValue, `${chat.id}.createdAt`);
+      const updatedAt = this.validateTimestamp(updatedAtValue, `${chat.id}.updatedAt`);
+      
+      const messages = this.sanitizeMessages(chat.data.messages || [], chat.id);
 
-      this.lastFullSync = now;
-
-    } finally {
-      this.isSyncing = false;
-    }
-  }
-
-  static toValidTimestamp(value) {
-    if (!value) return firebase.firestore.Timestamp.now();
-    
-    if (value instanceof firebase.firestore.Timestamp) return value;
-    
-    if (value instanceof Date) {
-      if (isNaN(value.getTime())) return firebase.firestore.Timestamp.now();
-      return firebase.firestore.Timestamp.fromDate(value);
-    }
-    
-    if (typeof value === 'number') {
-      if (!isFinite(value) || value < 0 || value > 8640000000000000) {
-        return firebase.firestore.Timestamp.now();
-      }
-      return firebase.firestore.Timestamp.fromMillis(value);
-    }
-    
-    if (typeof value === 'string') {
-      const parsed = Date.parse(value);
-      if (!isNaN(parsed)) {
-        return firebase.firestore.Timestamp.fromMillis(parsed);
-      }
-    }
-    
-    return firebase.firestore.Timestamp.now();
-  }
-
-  static sanitizeForFirestore(value, seen = new WeakSet()) {
-    if (value === null || value === undefined) return value;
-    
-    if (
-      typeof value === 'string' ||
-      (typeof value === 'number' && isFinite(value)) ||
-      typeof value === 'boolean'
-    ) return value;
-
-    if (value instanceof firebase.firestore.Timestamp) return value;
-    
-    if (value instanceof Date || typeof value === 'number') {
-      return FirebaseService.toValidTimestamp(value);
-    }
-
-    if (Array.isArray(value)) {
-      return value
-        .map(v => FirebaseService.sanitizeForFirestore(v, seen))
-        .filter(v => v !== undefined);
-    }
-
-    if (typeof value === 'object') {
-      if (seen.has(value)) return undefined;
-      seen.add(value);
-
-      const cleaned = {};
-      for (const [k, v] of Object.entries(value)) {
-        const cv = FirebaseService.sanitizeForFirestore(v, seen);
-        if (cv !== undefined) cleaned[k] = cv;
-      }
-      return Object.keys(cleaned).length ? cleaned : undefined;
-    }
-    
-    return undefined;
-  }
-
-  static normalizeChat(raw, key) {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-      return {
-        id: key.replace(/^CHAT_/, ''),
-        title: 'Chat',
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        messages: [],
-        syncedAt: 0
+      const title = chat.data.chatTitle || chat.data.title || chat.data.name || 'New Chat';
+      const modelTitle = chat.data.modelInfo?.title || null;
+      
+      const folderID = chat.data.folderID || chat.data.folderId || null;
+      
+      const data = {
+        id: chat.id,
+        chatID: chat.data.chatID || chat.id,
+        chatTitle: String(title).slice(0, 500),
+        model: chat.data.model || null,
+        modelTitle: modelTitle,
+        modelInfo: chat.data.modelInfo || null,
+        selectedMultimodelIDs: chat.data.selectedMultimodelIDs || [],
+        folderID: folderID,
+        chatParams: chat.data.chatParams || null,
+        character: chat.data.character || null,
+        linkedPlugins: chat.data.linkedPlugins || [],
+        tokenUsage: chat.data.tokenUsage || null,
+        messages: messages,
+        createdAt: createdAt,
+        updatedAt: updatedAt,
+        syncedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        lastDevice: this.deviceId,
       };
+
+      const tokensInfo = chat.data.tokenUsage 
+        ? `${chat.data.tokenUsage.totalTokens || 0}t $${(chat.data.tokenUsage.totalCostUSD || 0).toFixed(4)}`
+        : 'no-usage';
+      
+      const folderInfo = folderID ? `folder:${folderID}` : 'no-folder';
+
+      this.logger.log('info', `Upload [${chat.id}]: ${messages.length}msgs, ${tokensInfo}, ${folderInfo}`);
+      
+      await docRef.set(data);
     }
 
-    const now = Date.now();
-    
-    const obj = {
-      ...raw,
-      id: raw.id || key.replace(/^CHAT_/, ''),
-      title: raw.title || raw.name || 'Chat',
-      createdAt: raw.createdAt || now,
-      updatedAt: raw.updatedAt || now,
-      messages: [],
-      syncedAt: raw.syncedAt || 0
-    };
-
-    if (Array.isArray(raw.messages)) {
-      obj.messages = raw.messages
-        .filter(m => m && typeof m === 'object' && !Array.isArray(m))
-        .map(m => ({
-          ...m,
-          createdAt: m.createdAt || m.timestamp || now,
-          updatedAt: m.updatedAt || m.timestamp || now
-        }));
-    }
-
-    if (!obj.title && obj.messages.length) {
-      const firstUser = obj.messages.find(m => m.role === 'user');
-      if (firstUser && firstUser.content) {
-        obj.title = firstUser.content.slice(0, 60);
-      }
-    }
-    
-    return obj;
-  }
-
-  async flagLocalSyncedAt(chatId) {
-    const idb = await this.getIndexedDB();
-    return new Promise((resolve, reject) => {
-      const tx = idb.transaction(['keyval'], 'readwrite');
-      const st = tx.objectStore('keyval');
-      const req = st.get(chatId);
-      
-      req.onsuccess = () => {
-        const data = req.result;
-        if (!data) {
-          resolve();
-          return;
-        }
-        
-        data.syncedAt = Date.now();
-        const putReq = st.put(data, chatId);
-        putReq.onsuccess = () => resolve();
-        putReq.onerror = () => reject(putReq.error);
-      };
-      
-      req.onerror = () => reject(req.error);
-    });
-  }
-
-  async syncChatRecord(chatId, localData) {
-    if (this.syncLocks.has(chatId)) {
-      this.logger.log('warning', `Sync already in progress for ${chatId}`);
-      return;
-    }
-    this.syncLocks.add(chatId);
-
-    try {
-      const docRef = this.db.collection('chats').doc(chatId);
-      
-      const snap = await docRef.get();
-      
-      let remoteUp = 0;
-      if (snap.exists) {
-        const data = snap.data();
-        if (data && data.updatedAt) {
-          if (data.updatedAt.toMillis) {
-            remoteUp = data.updatedAt.toMillis();
-          } else if (typeof data.updatedAt === 'number') {
-            remoteUp = data.updatedAt;
-          }
-        }
+    sanitizeMessages(messages, chatId) {
+      if (!Array.isArray(messages)) {
+        this.logger.log('warning', `${chatId}: messages not array`);
+        return [];
       }
       
-      const hasMetaChange = localData.updatedAt > remoteUp;
-
-      if (hasMetaChange) {
-        await docRef.set(
-          {
-            title: localData.title || 'Chat',
-            updatedAt: FirebaseService.toValidTimestamp(Date.now()),
-            createdAt: FirebaseService.toValidTimestamp(localData.createdAt)
-          },
-          { merge: true }
-        );
-      }
-
-      const remoteSnapshot = await docRef.collection('messages')
-        .orderBy('createdAt')
-        .get();
-      
-      const remoteMessages = remoteSnapshot.docs.map(d => {
-        const data = d.data();
-        return {
-          id: d.id,
-          ...data,
-          createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : data.createdAt,
-          updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : data.updatedAt
-        };
-      });
-
-      const remoteMap = new Map(remoteMessages.map(m => [m.id, m]));
-      
-      const messagesToUpload = [];
-      const localIndexToId = new Map();
-      
-      const lastSynced = localData.syncedAt || 0;
-      
-      localData.messages.forEach((msg, index) => {
-        if (!msg || typeof msg !== 'object') return;
-
-        let docId;
-        let shouldUpload = false;
-
-        if (msg.id) {
-          docId = String(msg.id);
-          const remote = remoteMap.get(docId);
-          
-          if (!remote) {
-            shouldUpload = true;
-          } else {
-            const localTime = (typeof msg.updatedAt === 'number') ? msg.updatedAt : 0;
-            const remoteTime = (typeof remote.updatedAt === 'number') ? remote.updatedAt : 0;
-            shouldUpload = localTime > remoteTime;
+      return messages
+        .filter((m, idx) => {
+          if (!m || typeof m !== 'object') {
+            this.logger.log('warning', `${chatId}: Invalid msg ${idx}`);
+            return false;
           }
-        } else {
-          const msgTime = msg.updatedAt || msg.createdAt || 0;
           
-          if (msgTime > lastSynced) {
-            const newDocRef = docRef.collection('messages').doc();
-            docId = newDocRef.id;
-            shouldUpload = true;
-            localIndexToId.set(index, docId);
-          }
-        }
-
-        if (shouldUpload && docId) {
-          const msgCopy = { 
-            ...msg, 
-            id: docId
-          };
-          
-          const sanitized = {};
-          for (const [key, val] of Object.entries(msgCopy)) {
-            if (key === 'createdAt' || key === 'updatedAt') {
-              sanitized[key] = FirebaseService.toValidTimestamp(val);
-            } else {
-              const clean = FirebaseService.sanitizeForFirestore(val);
-              if (clean !== undefined) {
-                sanitized[key] = clean;
-              }
+          if (m.role === 'assistant' || m._reasoning_start || m.model) {
+            if (m._reasoning_start && !m._reasoning_finish) {
+              this.logger.log('warning', `${chatId}: Skip streaming msg ${idx} (thinking incomplete)`);
+              return false;
             }
-          }
-          
-          if (sanitized && Object.keys(sanitized).length > 0) {
-            messagesToUpload.push({ id: docId, data: sanitized });
-          }
-        }
-      });
-
-      if (messagesToUpload.length > 0) {
-        this.listenerIgnoreNext.set(chatId, Date.now() + 5000); 
-        
-        this.logger.log('info', `📤 Uploading ${messagesToUpload.length} messages to ${chatId}`);
-        
-        const maxBatchSize = 400;
-        for (let i = 0; i < messagesToUpload.length; i += maxBatchSize) {
-          const chunk = messagesToUpload.slice(i, i + maxBatchSize);
-          const batch = this.db.batch();
-          
-          chunk.forEach(({ id, data }) => {
-            const mRef = docRef.collection('messages').doc(id);
-            batch.set(mRef, data, { merge: true });
-          });
-          
-          await batch.commit();
-        }
-      }
-
-      if (localIndexToId.size > 0) {
-        await this.updateLocalMessageIds(chatId, localIndexToId);
-      }
-
-      const localIds = new Set(
-        localData.messages
-          .filter(m => m && m.id)
-          .map(m => String(m.id))
-      );
-      
-      localIndexToId.forEach(id => localIds.add(id));
-
-      const remoteMsgsToDownload = remoteMessages.filter(m => 
-        !localIds.has(m.id)
-      );
-
-      if (remoteMsgsToDownload.length > 0) {
-        this.logger.log('info', `📥 Downloading ${remoteMsgsToDownload.length} messages from ${chatId}`);
-        await this.mergeIntoLocal(chatId, remoteMsgsToDownload);
-      }
-
-      await this.flagLocalSyncedAt(chatId);
-      
-    } catch (error) {
-      this.logger.log('error', `syncChatRecord failed for ${chatId}`, error);
-      throw error;
-    } finally {
-      this.syncLocks.delete(chatId);
-    }
-  }
-
-  async updateLocalMessageIds(chatId, indexToIdMap) {
-    const idb = await this.getIndexedDB();
-    return new Promise((resolve, reject) => {
-      const tx = idb.transaction(['keyval'], 'readwrite');
-      const st = tx.objectStore('keyval');
-      const req = st.get(chatId);
-      
-      req.onsuccess = () => {
-        const data = req.result;
-        if (!data || !Array.isArray(data.messages)) {
-          resolve();
-          return;
-        }
-        
-        indexToIdMap.forEach((id, index) => {
-          if (data.messages[index] && !data.messages[index].id) {
-            data.messages[index].id = id;
-            data.messages[index].updatedAt = Date.now();
-          }
-        });
-        
-        data.updatedAt = Date.now();
-        
-        const putReq = st.put(data, chatId);
-        putReq.onsuccess = () => resolve();
-        putReq.onerror = () => reject(putReq.error);
-      };
-      
-      req.onerror = () => reject(req.error);
-    });
-  }
-
-  attachListener(chatId) {
-    if (!this.db) {
-      this.logger.log('error', `attachListener(${chatId}) called but this.db is null`);
-      return;
-    }
-
-    if (this.listeners.some(l => l.chatId === chatId)) {
-      this.logger.log('warning', `Listener already exists for ${chatId}`);
-      return;
-    }
-
-
-    const fiveMinutesAgo = firebase.firestore.Timestamp.fromMillis(
-      Date.now() - (5 * 60 * 1000)
-    );
-
-    const unsubscribe = this.db
-      .collection('chats').doc(chatId).collection('messages')
-      .where('updatedAt', '>=', fiveMinutesAgo) 
-      .orderBy('updatedAt', 'desc')
-      .limit(50)
-      .onSnapshot(snap => {
-        const ignoreUntil = this.listenerIgnoreNext.get(chatId) || 0;
-        if (Date.now() < ignoreUntil) {
-          this.logger.log('info', `🔇 Ignoring listener event for ${chatId} (own upload)`);
-          return;
-        }
-
-        if (!snap.docChanges().length || this.isSyncing) return;
-        
-        const changes = snap.docChanges();
-        
-        const msgsToInject = changes
-          .filter(c => c.type === 'added' || c.type === 'modified')
-          .map(c => {
-            const data = c.doc.data();
-            return {
-              id: c.doc.id,
-              ...data,
-              createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : data.createdAt,
-              updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : data.updatedAt
-            };
-          });
-        
-        const msgsToRemove = changes
-          .filter(c => c.type === 'removed')
-          .map(c => c.doc.id);
-        
-        if (msgsToInject.length > 0) {
-          this.logger.log('info', `📨 Listener received ${msgsToInject.length} messages for ${chatId}`);
-          this.mergeIntoLocal(chatId, msgsToInject).catch(e => {
-            this.logger.log('error', 'Failed to merge messages', e);
-          });
-        }
-
-        if (msgsToRemove.length > 0) {
-          this.removeFromLocal(chatId, msgsToRemove).catch(e => {
-            this.logger.log('error', 'Failed to remove messages', e);
-          });
-        }
-      }, error => {
-        this.logger.log('error', `Listener error for ${chatId}`, error);
-      });
-
-    this.listeners.push({ chatId, unsubscribe });
-    this.logger.log('info', `👂 Listener attached for ${chatId} (recent messages only)`);
-  }
-
-  async mergeIntoLocal(chatId, msgs) {
-    if (!msgs || msgs.length === 0) return;
-
-    if (!this.mergeLocks.has(chatId)) {
-      this.mergeLocks.set(chatId, {
-        locked: false,
-        queue: []
-      });
-    }
-
-    const lockInfo = this.mergeLocks.get(chatId);
-
-    if (lockInfo.locked) {
-      return new Promise((resolve, reject) => {
-        lockInfo.queue.push({ msgs, resolve, reject });
-      });
-    }
-
-    lockInfo.locked = true;
-
-    try {
-      await this._performMerge(chatId, msgs);
-      
-      while (lockInfo.queue.length > 0) {
-        const next = lockInfo.queue.shift();
-        try {
-          await this._performMerge(chatId, next.msgs);
-          next.resolve();
-        } catch (e) {
-          next.reject(e);
-        }
-      }
-      
-    } finally {
-      lockInfo.locked = false;
-    }
-  }
-
-  async _performMerge(chatId, msgs) {
-    const idb = await this.getIndexedDB();
-    
-    return new Promise((resolve, reject) => {
-      const tx = idb.transaction(['keyval'], 'readwrite');
-      
-      let timeoutHandle;
-      const setupTimeout = () => {
-        timeoutHandle = setTimeout(() => {
-          try {
-            tx.abort();
-          } catch {}
-          reject(new Error('Transaction timeout'));
-        }, 5000);
-      };
-      
-      setupTimeout();
-      
-      const clearTimer = () => {
-        if (timeoutHandle) {
-          clearTimeout(timeoutHandle);
-          timeoutHandle = null;
-        }
-      };
-      
-      tx.oncomplete = () => {
-        clearTimer();
-        resolve();
-      };
-      
-      tx.onerror = () => {
-        clearTimer();
-        reject(tx.error);
-      };
-      
-      tx.onabort = () => {
-        clearTimer();
-        reject(new Error('Transaction aborted'));
-      };
-      
-      const st = tx.objectStore('keyval');
-      const req = st.get(chatId);
-      
-      req.onsuccess = () => {
-        const chat = req.result || { 
-          id: chatId.replace(/^CHAT_/, ''),
-          messages: [], 
-          updatedAt: 0 
-        };
-        
-        if (!Array.isArray(chat.messages)) {
-          chat.messages = [];
-        }
-        
-        const existingById = new Map(
-          chat.messages.filter(m => m && m.id).map(m => [m.id, m])
-        );
-        
-        let addedCount = 0;
-        let updatedCount = 0;
-        
-        msgs.forEach(m => {
-          if (!m || typeof m !== 'object' || !m.id) return;
-
-          if (existingById.has(m.id)) {
-            const existing = existingById.get(m.id);
-            const localTime = (typeof existing.updatedAt === 'number') ? existing.updatedAt : 0;
-            const remoteTime = (typeof m.updatedAt === 'number') ? m.updatedAt : 0;
             
-            if (remoteTime > localTime) {
-              Object.assign(existing, m);
-              updatedCount++;
+            const contentLength = typeof m.content === 'string' ? m.content.length : 0;
+            const createdAt = m.createdAt ? new Date(m.createdAt).getTime() : 0;
+            const now = Date.now();
+            const ageSeconds = (now - createdAt) / 1000;
+            
+            if (ageSeconds < 10 && contentLength < 50) {
+              this.logger.log('warning', `${chatId}: Skip potential streaming msg ${idx} (${contentLength} chars, ${ageSeconds.toFixed(0)}s old)`);
+              return false;
             }
-          } else {
-            chat.messages.push(m);
-            addedCount++;
           }
-        });
-
-        chat.messages.sort((a, b) => {
-          const aTime = (typeof a.createdAt === 'number') ? a.createdAt : 0;
-          const bTime = (typeof b.createdAt === 'number') ? b.createdAt : 0;
-          if (aTime !== bTime) return aTime - bTime;
-          const aId = a.id || '';
-          const bId = b.id || '';
-          return aId.localeCompare(bId);
-        });
-        
-        const seen = new Set();
-        chat.messages = chat.messages.filter(m => {
-          if (!m || !m.id) return false;
-          if (seen.has(m.id)) return false;
-          seen.add(m.id);
+          
           return true;
-        });
+        })
+        .map((m, idx) => {
+          try {
+            let textContent = '';
+            
+            if (typeof m.content === 'string') {
+              textContent = m.content;
+            } else if (Array.isArray(m.content)) {
+              textContent = m.content
+                .filter(part => part && part.type === 'text' && part.text)
+                .map(part => part.text)
+                .join('\n');
+            } else if (m.content && typeof m.content === 'object') {
+              if (m.content.text) textContent = m.content.text;
+              else if (m.content.content) textContent = m.content.content;
+              else textContent = JSON.stringify(m.content);
+            }
 
-        chat.updatedAt = Date.now();
-        
-        const putReq = st.put(chat, chatId);
-        putReq.onsuccess = () => {
-          if (addedCount > 0 || updatedCount > 0) {
-            this.logger.log('info', `✅ Merged into ${chatId}: +${addedCount} new, ~${updatedCount} updated`);
+            let messageRole = 'user';
+            if (m.role && m.role !== 'undefined') {
+              messageRole = String(m.role);
+            } else if (m._reasoning_start || m.reasoning_content) {
+              messageRole = 'assistant';
+            } else if (m.model || m.usage) {
+              messageRole = 'assistant';
+            }
+
+            const clean = {
+              role: messageRole.slice(0, 50),
+              content: String(textContent).slice(0, 100000),
+              createdAt: this.validateTimestamp(m.createdAt, `${chatId}.msg[${idx}].createdAt`).toMillis()
+            };
+            
+            if (m.uuid) clean.uuid = String(m.uuid).slice(0, 100);
+            if (m.model) clean.model = String(m.model).slice(0, 100);
+            if (m.usage) clean.usage = m.usage;
+            
+            if (m.reasoning_content) clean.reasoning_content = String(m.reasoning_content).slice(0, 100000);
+            if (m.reasoning_summary) clean.reasoning_summary = m.reasoning_summary;
+            if (m.reasoning_details) clean.reasoning_details = m.reasoning_details;
+            if (m._reasoning_start) clean._reasoning_start = m._reasoning_start;
+            if (m._reasoning_finish) clean._reasoning_finish = m._reasoning_finish;
+            
+            if (typeof m.content === 'string') {
+              clean._contentType = 'string';
+            } else if (Array.isArray(m.content)) {
+              clean._contentType = 'array';
+              clean._originalContent = m.content;
+            }
+            
+            return clean;
+          } catch (error) {
+            this.logger.log('error', `${chatId}: Failed msg ${idx}`, error.message);
+            return {
+              role: 'user',
+              content: '[Error parsing message]',
+              createdAt: Date.now()
+            };
           }
-        };
-        putReq.onerror = () => {
-          clearTimer();
-          reject(putReq.error);
-        };
-      };
-      
-      req.onerror = () => {
-        clearTimer();
-        reject(req.error);
-      };
-    });
-  }
-
-  async removeFromLocal(chatId, msgIds) {
-    const idb = await this.getIndexedDB();
-    
-    return new Promise((resolve, reject) => {
-      const tx = idb.transaction(['keyval'], 'readwrite');
-      const st = tx.objectStore('keyval');
-      const req = st.get(chatId);
-      
-      req.onsuccess = () => {
-        const chat = req.result;
-        if (!chat) {
-          resolve();
-          return;
-        }
-        
-        if (!Array.isArray(chat.messages)) {
-          resolve();
-          return;
-        }
-        
-        const idsToRemove = new Set(msgIds);
-        const before = chat.messages.length;
-        chat.messages = chat.messages.filter(m => 
-          m && (!m.id || !idsToRemove.has(m.id))
-        );
-        const removed = before - chat.messages.length;
-        
-        if (removed > 0) {
-          chat.updatedAt = Date.now();
-          const putReq = st.put(chat, chatId);
-          putReq.onsuccess = () => {
-            this.logger.log('info', `🗑️ Removed ${removed} messages from ${chatId}`);
-            resolve();
-          };
-          putReq.onerror = () => reject(putReq.error);
-        } else {
-          resolve();
-        }
-      };
-      
-      req.onerror = () => reject(req.error);
-    });
-  }
-
-  async getIndexedDB() {
-    if (this.dbInstance) {
-      try {
-        const tx = this.dbInstance.transaction(['keyval'], 'readonly');
-        tx.abort();
-        return this.dbInstance;
-      } catch (e) {
-        this.dbInstance = null;
-      }
+        });
     }
 
-    return new Promise((resolve, reject) => {
-      const request = indexedDB.open('keyval-store', 1);
+
+    async downloadAllChats() {
+      const workspaceId = this.config.get('workspaceId');
       
-      request.onsuccess = () => {
-        this.dbInstance = request.result;
+      const snapshot = await this.db
+        .collection('workspaces')
+        .doc(workspaceId)
+        .collection('chats')
+        .get();
+
+      return snapshot.docs.map(doc => {
+        const data = doc.data();
         
-        this.dbInstance.onversionchange = () => {
-          this.dbInstance.close();
-          this.dbInstance = null;
+        const createdAtMillis = data.createdAt?.toMillis ? data.createdAt.toMillis() : Date.now();
+        const updatedAtMillis = data.updatedAt?.toMillis ? data.updatedAt.toMillis() : Date.now();
+        
+        return {
+          id: doc.id,
+          chatID: data.chatID || doc.id,
+          chatTitle: data.chatTitle || 'New Chat',
+          model: data.model || null,
+          modelTitle: data.modelTitle || null,
+          modelInfo: data.modelInfo || null,
+          selectedMultimodelIDs: data.selectedMultimodelIDs || [],
+          folderID: data.folderID || null,
+          chatParams: data.chatParams || null,
+          character: data.character || null,
+          linkedPlugins: data.linkedPlugins || [],
+          tokenUsage: data.tokenUsage || null,
+          messages: Array.isArray(data.messages) ? data.messages : [],
+          createdAt: this.isValidMillis(createdAtMillis) ? createdAtMillis : Date.now(),
+          updatedAt: this.isValidMillis(updatedAtMillis) ? updatedAtMillis : Date.now(),
+          lastDevice: data.lastDevice
         };
+      });
+    }
+
+    async mergeRemoteChat(remoteChat) {
+      const chatKey = `CHAT_${remoteChat.id}`;
+      const idb = await this.getIndexedDB();
+
+      return new Promise((resolve, reject) => {
+        const tx = idb.transaction(['keyval'], 'readwrite');
+        const store = tx.objectStore('keyval');
         
-        this.dbInstance.onclose = () => {
-          this.dbInstance = null;
+        const getReq = store.get(chatKey);
+        
+        getReq.onsuccess = () => {
+          const localChat = getReq.result;
+
+          if (!localChat) {
+            const newChat = {
+              id: remoteChat.id,
+              chatID: remoteChat.chatID || remoteChat.id,
+              chatTitle: remoteChat.chatTitle,
+              model: remoteChat.model,
+              modelInfo: remoteChat.modelInfo,
+              selectedMultimodelIDs: remoteChat.selectedMultimodelIDs || [],
+              folderID: remoteChat.folderID,
+              chatParams: remoteChat.chatParams,
+              character: remoteChat.character,
+              linkedPlugins: remoteChat.linkedPlugins || [],
+              tokenUsage: remoteChat.tokenUsage,
+              messages: remoteChat.messages.map(m => this.reconstructMessage(m)),
+              createdAt: new Date(remoteChat.createdAt).toISOString(),
+              updatedAt: new Date(remoteChat.updatedAt).toISOString(),
+              syncedAt: Date.now()
+            };
+            
+            store.put(newChat, chatKey).onsuccess = () => {
+              this.logger.log('info', `Created [${remoteChat.id}]: folder:${remoteChat.folderID || 'none'}`);
+              this.lastSyncTimestamps[remoteChat.id] = Date.now();
+              resolve(true);
+            };
+            return;
+          }
+
+          const localTime = typeof localChat.updatedAt === 'string' 
+            ? Date.parse(localChat.updatedAt) 
+            : (localChat.updatedAt || 0);
+          const remoteTime = remoteChat.updatedAt || 0;
+
+          if (remoteTime > localTime && remoteChat.lastDevice !== this.deviceId) {
+            localChat.chatTitle = remoteChat.chatTitle;
+            if (remoteChat.model) localChat.model = remoteChat.model;
+            if (remoteChat.modelInfo) localChat.modelInfo = remoteChat.modelInfo;
+            if (remoteChat.selectedMultimodelIDs) localChat.selectedMultimodelIDs = remoteChat.selectedMultimodelIDs;
+            if (remoteChat.folderID !== undefined) localChat.folderID = remoteChat.folderID;
+            if (remoteChat.chatParams) localChat.chatParams = remoteChat.chatParams;
+            if (remoteChat.character !== undefined) localChat.character = remoteChat.character;
+            if (remoteChat.linkedPlugins) localChat.linkedPlugins = remoteChat.linkedPlugins;
+            if (remoteChat.tokenUsage) localChat.tokenUsage = remoteChat.tokenUsage;
+            
+            localChat.messages = remoteChat.messages.map(m => this.reconstructMessage(m));
+            
+            localChat.updatedAt = new Date(remoteChat.updatedAt).toISOString();
+            localChat.syncedAt = Date.now();
+            
+            store.put(localChat, chatKey).onsuccess = () => {
+              this.logger.log('info', `Updated [${remoteChat.id}]: folder:${remoteChat.folderID || 'none'}`);
+              this.lastSyncTimestamps[remoteChat.id] = Date.now();
+              resolve(true);
+            };
+          } else {
+            this.logger.log('info', `Skip [${remoteChat.id}]`);
+            resolve(false);
+          }
         };
-        
-        resolve(request.result);
-      };
-      
-      request.onerror = () => {
-        reject(new Error('Failed to open IndexedDB'));
-      };
-      
-      request.onblocked = () => {
-        this.logger.log('warning', 'IndexedDB blocked');
-      };
-      
-      request.onupgradeneeded = (e) => {
-        const db = e.target.result;
-        if (!db.objectStoreNames.contains('keyval')) {
-          db.createObjectStore('keyval');
+
+        getReq.onerror = reject;
+      });
+    }
+
+    reconstructMessage(m) {
+      let messageRole = m.role || 'user';
+      if (messageRole === 'undefined' || !messageRole) {
+        if (m._reasoning_start || m.reasoning_content || m.model || m.usage) {
+          messageRole = 'assistant';
+        } else {
+          messageRole = 'user';
         }
+      }
+
+      const reconstructed = {
+        role: messageRole,
+        createdAt: new Date(m.createdAt).toISOString(),
       };
-    });
+
+      if (m._contentType === 'string') {
+        reconstructed.content = m.content;
+      } else if (m._contentType === 'array' && m._originalContent) {
+        reconstructed.content = m._originalContent;
+      } else if (typeof m.content === 'string') {
+        reconstructed.content = [{type: 'text', text: m.content}];
+      } else {
+        reconstructed.content = m.content;
+      }
+
+      if (m.uuid) reconstructed.uuid = m.uuid;
+      if (m.model) reconstructed.model = m.model;
+      if (m.usage) reconstructed.usage = m.usage;
+
+      if (m.reasoning_content) reconstructed.reasoning_content = m.reasoning_content;
+      if (m.reasoning_summary) reconstructed.reasoning_summary = m.reasoning_summary;
+      if (m.reasoning_details) reconstructed.reasoning_details = m.reasoning_details;
+      if (m._reasoning_start) reconstructed._reasoning_start = m._reasoning_start;
+      if (m._reasoning_finish) reconstructed._reasoning_finish = m._reasoning_finish;
+
+      return reconstructed;
+    }
+
+    async getIndexedDB() {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open('keyval-store', 1);
+        
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(new Error('Failed to open IndexedDB'));
+        
+        request.onupgradeneeded = (e) => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains('keyval')) {
+            db.createObjectStore('keyval');
+          }
+        };
+      });
+    }
   }
-}
 
   /* ============================================================
-     4. CloudSyncApp
+     APP
   ============================================================ */
   class CloudSyncApp {
     constructor() {
       this.logger = new Logger();
       this.config = new ConfigManager();
-      this.firebase = new FirebaseService(this.config, this.logger);
+      this.firebase = new FirebaseService(this.config, this.logger, this);
       this.autoSyncInterval = null;
-      this.modalCleanupCallbacks = [];
-      this.lastSyncTime = null;
+      this.setupAutoRefresh();
+    }
+    
+    setupAutoRefresh() {
+      window.addEventListener('tm-sync-refresh', (e) => {
+        const count = e.detail.chatIds.length;
+        const action = e.detail.action || 'synced';
+        
+        this.logger.log('success', `Refreshing UI for ${count} ${action} chats`);
+        
+        this.showSyncNotification(count, action);
+        
+        setTimeout(() => {
+          this.triggerSoftRefresh();
+        }, 500);
+      });
+    }
+
+    triggerSoftRefresh() {
+      try {
+        document.dispatchEvent(new Event('visibilitychange', { bubbles: true }));
+        window.dispatchEvent(new Event('focus'));
+        this.logger.log('success', 'Soft refresh triggered');
+      } catch (e) {
+        this.logger.log('error', 'Soft refresh failed', e.message);
+      }
+    }
+
+    showSyncNotification(count, action = 'synced') {
+      const existingNotif = document.querySelector('.tm-sync-notification');
+      if (existingNotif) existingNotif.remove();
+
+      const notif = document.createElement('div');
+      notif.className = 'tm-sync-notification';
+      
+      const bgColor = action === 'deleted' ? '#ef4444' : '#22c55e';
+      const icon = action === 'deleted' ? '🗑️' : '✓';
+      const text = action === 'deleted' 
+        ? `${count} chat${count > 1 ? 's' : ''} deleted`
+        : `${count} chat${count > 1 ? 's' : ''} synced`;
+      
+      notif.style.cssText = `
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        background: ${bgColor};
+        color: white;
+        padding: 12px 20px;
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 500;
+        z-index: 10000;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        animation: slideIn 0.3s ease-out;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      `;
+      notif.textContent = `${icon} ${text}`;
+      
+      const style = document.createElement('style');
+      style.textContent = `
+        @keyframes slideIn {
+          from { transform: translateX(400px); opacity: 0; }
+          to { transform: translateX(0); opacity: 1; }
+        }
+        @keyframes slideOut {
+          from { transform: translateX(0); opacity: 1; }
+          to { transform: translateX(400px); opacity: 0; }
+        }
+      `;
+      if (!document.querySelector('style[data-tm-sync]')) {
+        style.setAttribute('data-tm-sync', 'true');
+        document.head.appendChild(style);
+      }
+      
+      document.body.appendChild(notif);
+      
+      setTimeout(() => {
+        notif.style.animation = 'slideOut 0.3s ease-in';
+        setTimeout(() => notif.remove(), 300);
+      }, 3000);
     }
     
     async initialize() {
-      this.logger.log('start', '🚀 Initializing Firebase Sync v2.7 (FIXED)');
+      this.logger.log('start', 'Firebase Sync v3.7 FINAL');
       await this.waitForDOM();
       this.insertSyncButton();
 
       if (this.config.isConfigured()) {
         try {
+          this.firebase.loadLastSyncTimestamps();
+          
           await this.firebase.initialize();
+          this.updateSyncStatus('success');
           
           try {
-            await this.firebase.pushLocalChats();
-            this.lastSyncTime = Date.now();
+            await this.firebase.syncAllChats();
           } catch (e) {
-            this.logger.log('error', 'Initial sync failed', e);
+            this.logger.log('error', 'Initial sync failed', e.message);
           }
-          
-          try {
-            const idb = await this.firebase.getIndexedDB();
-            const tx = idb.transaction(['keyval'], 'readonly');
-            const store = tx.objectStore('keyval');
-            
-            await new Promise((resolve) => {
-              store.getAllKeys().onsuccess = (e) => {
-                const keys = e.target.result.filter(k => 
-                  typeof k === 'string' && k.startsWith('CHAT_')
-                );
-                this.logger.log('info', `🎧 Attaching listeners to ${keys.length} chats`);
-                keys.forEach(chatId => {
-                  this.firebase.knownChatIds.add(chatId);
-                  this.firebase.attachListener(chatId);
-                });
-                resolve();
-              };
-            });
-          } catch (e) {
-            this.logger.log('error', 'Failed to attach listeners', e);
-          }
-          
-          this.firebase.startChatWatcher();
           
           this.startAutoSync();
-          this.updateSyncStatus('success');
+          
         } catch (e) {
           this.logger.log('error', 'Init failed', e);
           this.updateSyncStatus('error');
+          
+          if (e.message.includes('Enable Anonymous') || e.message.includes('Firebase API not ready')) {
+            alert(e.message);
+          }
         }
-      } else {
-        this.logger.log('info', 'Not configured');
       }
     }
     
@@ -1016,6 +986,7 @@ class FirebaseService {
     
     insertSyncButton() {
       if (document.querySelector('[data-element-id="workspace-tab-cloudsync"]')) return;
+      
       const style = document.createElement('style');
       style.textContent = `
         #sync-status-dot {
@@ -1042,7 +1013,9 @@ class FirebaseService {
           </div>
           <span class="font-normal self-stretch text-center text-xs leading-4 md:leading-none">Sync</span>
         </span>`;
+      
       button.addEventListener('click', () => this.openSyncModal());
+      
       const chatButton = document.querySelector('button[data-element-id="workspace-tab-chat"]');
       if (chatButton?.parentNode) {
         chatButton.parentNode.insertBefore(button, chatButton.nextSibling);
@@ -1052,7 +1025,11 @@ class FirebaseService {
     updateSyncStatus(status = 'success') {
       const dot = document.getElementById('sync-status-dot');
       if (!dot) return;
-      const colors = { success: '#22c55e', error: '#ef4444', warning: '#eab308', syncing: '#3b82f6' };
+      const colors = { 
+        success: '#22c55e', 
+        error: '#ef4444', 
+        syncing: '#3b82f6' 
+      };
       dot.style.backgroundColor = colors[status] || '#6b7280';
       dot.style.display = 'block';
     }
@@ -1066,175 +1043,137 @@ class FirebaseService {
       const overlay = document.createElement('div');
       overlay.className = 'modal-overlay';
       overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999;';
+      
       const modal = document.createElement('div');
       modal.className = 'cloud-sync-modal';
-      modal.style.cssText = 'width:100%;max-width:32rem;background:#27272a;color:#fff;border-radius:0.5rem;padding:1rem;border:1px solid rgba(255,255,255,0.1);box-shadow:0 20px 25px -5px rgba(0,0,0,0.3);';
-      modal.innerHTML = this.getModalHTML();
-      overlay.appendChild(modal);
-      document.body.appendChild(overlay);
-      this.setupModalEventListeners(modal, overlay);
-    }
-    
-    getModalHTML() {
-      return `
-        <div class="text-white text-left text-sm">
-          <h3 class="text-center text-xl font-bold mb-3">Firebase Cloud Sync</h3>
+      modal.style.cssText = 'width:100%;max-width:32rem;background:#27272a;color:#fff;border-radius:0.5rem;padding:1.5rem;border:1px solid rgba(255,255,255,0.1);';
+      
+      modal.innerHTML = `
+        <div class="text-white text-sm">
+          <h3 class="text-center text-xl font-bold mb-4">Firebase Sync v3.7</h3>
           
-          <div class="mt-4 bg-zinc-800 px-3 py-2 rounded-lg border border-zinc-700">
-            <div class="flex items-center justify-between mb-2 cursor-pointer" id="firebase-config-header">
-              <label class="block text-sm font-medium text-zinc-300">Firebase Configuration</label>
-              <svg id="firebase-config-chevron" class="w-4 h-4 text-zinc-400 transform transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
-              </svg>
+          <div class="bg-blue-900/30 border border-blue-700 rounded p-3 mb-4 text-xs">
+            <strong>Setup:</strong><br>
+            1. Enable <strong>Anonymous</strong> auth in Firebase Console<br>
+            &nbsp;&nbsp;&nbsp;→ Authentication → Sign-in method → Anonymous<br>
+            2. Choose a <strong>Workspace ID</strong> (ex: my-workspace)<br>
+            3. Use <strong>SAME Workspace ID</strong> on all devices<br>
+            <br>
+            Each device = separate anonymous account<br>
+            All devices share the same workspace
+          </div>
+          
+          <div class="space-y-3 mb-4">
+            <div>
+              <label class="block text-xs text-zinc-400 mb-1">API Key</label>
+              <input id="fb-apiKey" type="password" style="width:100%;padding:8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff" value="${this.config.get('apiKey')}">
             </div>
-            <div id="firebase-config-content" class="space-y-2 hidden">
+            <div>
+              <label class="block text-xs text-zinc-400 mb-1">Auth Domain</label>
+              <input id="fb-authDomain" style="width:100%;padding:8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff" value="${this.config.get('authDomain')}">
+            </div>
+            <div>
+              <label class="block text-xs text-zinc-400 mb-1">Project ID</label>
+              <input id="fb-projectId" style="width:100%;padding:8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff" value="${this.config.get('projectId')}">
+            </div>
+            <div>
+              <label class="block text-xs text-zinc-400 mb-1">Storage Bucket</label>
+              <input id="fb-storageBucket" style="width:100%;padding:8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff" value="${this.config.get('storageBucket')}">
+            </div>
+            
+            <div class="pt-3 border-t border-zinc-700">
               <div>
-                <label class="block text-xs text-zinc-400 mb-1">API Key</label>
-                <input id="fb-apiKey" type="password" style="width:100%;padding:6px 8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff;font-size:0.875rem" value="${this.config.get('apiKey')}">
+                <label class="block text-xs text-zinc-400 mb-1">Workspace ID (same on all devices)</label>
+                <input id="fb-workspaceId" placeholder="my-workspace" style="width:100%;padding:8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff" value="${this.config.get('workspaceId')}">
+                <p class="text-xs text-zinc-500 mt-1">Share this ID with your other devices</p>
               </div>
-              <div>
-                <label class="block text-xs text-zinc-400 mb-1">Auth Domain</label>
-                <input id="fb-authDomain" style="width:100%;padding:6px 8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff;font-size:0.875rem" value="${this.config.get('authDomain')}">
-              </div>
-              <div>
-                <label class="block text-xs text-zinc-400 mb-1">Project ID</label>
-                <input id="fb-projectId" style="width:100%;padding:6px 8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff;font-size:0.875rem" value="${this.config.get('projectId')}">
-              </div>
-              <div>
-                <label class="block text-xs text-zinc-400 mb-1">Storage Bucket</label>
-                <input id="fb-storageBucket" style="width:100%;padding:6px 8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff;font-size:0.875rem" value="${this.config.get('storageBucket')}">
-              </div>
-              <div>
-                <label class="block text-xs text-zinc-400 mb-1">Sync Interval (seconds, min: 30)</label>
-                <input id="fb-syncInterval" type="number" min="30" style="width:100%;padding:6px 8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff;font-size:0.875rem" value="${this.config.get('syncInterval')}">
-              </div>
+            </div>
+            
+            <div>
+              <label class="block text-xs text-zinc-400 mb-1">Auto-sync (minutes)</label>
+              <input id="fb-syncInterval" type="number" min="1" style="width:100%;padding:8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff" value="${this.config.get('syncInterval')/60}">
             </div>
           </div>
 
-          <div class="flex justify-between mt-4 gap-2">
-            <button id="save-settings" class="px-3 py-1.5 bg-blue-600 rounded text-sm hover:bg-blue-700">Save & Verify</button>
-            <div class="flex gap-2">
-              <button id="sync-now" class="px-3 py-1.5 bg-green-600 rounded text-sm hover:bg-green-700" ${this.config.isConfigured() ? '' : 'disabled'}>Sync Now</button>
-              <button id="close-modal" class="px-3 py-1.5 bg-red-600 rounded text-sm hover:bg-red-700">Close</button>
-            </div>
+          <div class="flex gap-2 mb-3">
+            <button id="save-settings" class="flex-1 px-4 py-2 bg-blue-600 rounded hover:bg-blue-700">Save</button>
+            <button id="sync-now" class="flex-1 px-4 py-2 bg-green-600 rounded hover:bg-green-700" ${this.config.isConfigured() ? '' : 'disabled'}>Sync Now</button>
+            <button id="close-modal" class="px-4 py-2 bg-zinc-700 rounded hover:bg-zinc-600">Close</button>
           </div>
           
-          <div id="action-msg" class="text-center text-zinc-400 mt-3"></div>
+          <div id="action-msg" class="text-center text-sm text-zinc-400"></div>
           
           <div class="text-center mt-4 pt-3 text-xs text-zinc-500 border-t border-zinc-700">
-            <span>Firebase Cloud Sync v2.7 FIXED for TypingMind</span>
+            v3.7 FINAL - Device: ${this.firebase.deviceId.substr(0, 15)}... - Add ?log=true for debug
           </div>
         </div>`;
-    }
-    
-    setupModalEventListeners(modal, overlay) {
-      const closeHandler = () => this.closeModal(overlay);
-      const saveHandler = () => this.saveSettings(modal);
-      const syncHandler = () => this.handleSyncNow(modal);
-
-      overlay.addEventListener('click', (e) => { if (e.target === overlay) closeHandler(); });
-      modal.querySelector('#close-modal').addEventListener('click', closeHandler);
-      modal.querySelector('#save-settings').addEventListener('click', saveHandler);
-      modal.querySelector('#sync-now').addEventListener('click', syncHandler);
-
-      const header = modal.querySelector('#firebase-config-header');
-      const content = modal.querySelector('#firebase-config-content');
-      const chevron = modal.querySelector('#firebase-config-chevron');
       
-      let isAnimating = false;
-      header.addEventListener('click', () => {
-        if (isAnimating) return;
-        isAnimating = true;
-        
-        const isHidden = content.classList.contains('hidden');
-        content.classList.toggle('hidden');
-        chevron.style.transform = isHidden ? 'rotate(180deg)' : 'rotate(0)';
-        
-        setTimeout(() => { isAnimating = false; }, 300);
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+      
+      overlay.addEventListener('click', (e) => { 
+        if (e.target === overlay) overlay.remove(); 
       });
-
-      this.modalCleanupCallbacks.push(() => {
-        overlay.removeEventListener('click', closeHandler);
-      });
+      
+      modal.querySelector('#close-modal').addEventListener('click', () => overlay.remove());
+      modal.querySelector('#save-settings').addEventListener('click', () => this.saveSettings(modal, overlay));
+      modal.querySelector('#sync-now').addEventListener('click', () => this.handleSyncNow(modal));
     }
     
-    closeModal(overlay) {
-      this.modalCleanupCallbacks.forEach(cb => cb());
-      this.modalCleanupCallbacks = [];
-      overlay?.remove();
-    }
-    
-    async saveSettings(modal) {
+    async saveSettings(modal, overlay) {
       const actionMsg = modal.querySelector('#action-msg');
-      const saveBtn = modal.querySelector('#save-settings');
-      saveBtn.disabled = true;
-      saveBtn.textContent = 'Verifying...';
-      actionMsg.textContent = 'Verifying configuration...';
-
       const get = id => modal.querySelector(id).value.trim();
+      
       const newConfig = {
         apiKey: get('#fb-apiKey'),
         authDomain: get('#fb-authDomain'),
         projectId: get('#fb-projectId'),
         storageBucket: get('#fb-storageBucket'),
-        syncInterval: Math.max(parseInt(get('#fb-syncInterval')), 30), 
+        workspaceId: get('#fb-workspaceId'),
+        syncInterval: parseInt(get('#fb-syncInterval')) * 60,
       };
 
       if (!newConfig.apiKey || !newConfig.authDomain || !newConfig.projectId || !newConfig.storageBucket) {
-        actionMsg.textContent = '❌ Please fill all fields';
+        actionMsg.textContent = 'Fill all Firebase fields';
         actionMsg.style.color = '#ef4444';
-        saveBtn.disabled = false;
-        saveBtn.textContent = 'Save & Verify';
+        return;
+      }
+
+      if (!newConfig.workspaceId) {
+        actionMsg.textContent = 'Workspace ID required';
+        actionMsg.style.color = '#ef4444';
         return;
       }
 
       Object.keys(newConfig).forEach(k => this.config.set(k, newConfig[k]));
       this.config.save();
 
-      try {
-        await this.firebase.initialize();
-        actionMsg.textContent = '✅ Configuration saved! Page will reload...';
-        actionMsg.style.color = '#22c55e';
-        setTimeout(() => window.location.reload(), 1500);
-      } catch (e) {
-        this.logger.log('error', 'Verification failed', e.message);
-        actionMsg.textContent = `❌ Verification failed: ${e.message}`;
-        actionMsg.style.color = '#ef4444';
-        saveBtn.disabled = false;
-        saveBtn.textContent = 'Save & Verify';
-      }
+      actionMsg.textContent = 'Saved! Reloading...';
+      actionMsg.style.color = '#22c55e';
+      
+      setTimeout(() => window.location.reload(), 1000);
     }
     
     async handleSyncNow(modal) {
-      try {
-        if (!this.firebase.db) {
-          await this.firebase.initialize();
-        }
-      } catch (e) {
-        alert('Firebase init failed : ' + e.message);
-        return;
-      }
-
       const syncBtn = modal.querySelector('#sync-now');
       const actionMsg = modal.querySelector('#action-msg');
-      const original = syncBtn.textContent;
+      
       syncBtn.disabled = true;
-      syncBtn.textContent = 'Syncing…';
+      syncBtn.textContent = 'Syncing...';
       this.updateSyncStatus('syncing');
 
       try {
-        await this.firebase.pushLocalChats();
-        actionMsg.textContent = '✅ Sync completed!';
+        await this.firebase.syncAllChats();
+        actionMsg.textContent = 'Sync complete!';
         actionMsg.style.color = '#22c55e';
         this.updateSyncStatus('success');
-        this.lastSyncTime = Date.now();
       } catch (e) {
-        actionMsg.textContent = `❌ Sync failed: ${e.message}`;
+        actionMsg.textContent = e.message;
         actionMsg.style.color = '#ef4444';
         this.updateSyncStatus('error');
       } finally {
         setTimeout(() => {
-          syncBtn.textContent = original;
+          syncBtn.textContent = 'Sync Now';
           syncBtn.disabled = false;
         }, 2000);
       }
@@ -1242,37 +1181,25 @@ class FirebaseService {
     
     startAutoSync() {
       if (this.autoSyncInterval) clearInterval(this.autoSyncInterval);
-      const interval = Math.max(this.config.get('syncInterval') * 1000, 30000); 
+      
+      const intervalMs = this.config.get('syncInterval') * 1000;
       
       this.autoSyncInterval = setInterval(async () => {
-        if (this.firebase.isSyncing) {
-          this.logger.log('info', '⏸️ Auto-sync skipped (already syncing)');
-          return;
-        }
+        if (this.firebase.isSyncing) return;
         
-        if (this.lastSyncTime) {
-          const timeSinceLastSync = Date.now() - this.lastSyncTime;
-          if (timeSinceLastSync < interval) {
-            this.logger.log('info', `⏸️ Auto-sync skipped (last sync ${Math.round(timeSinceLastSync/1000)}s ago)`);
-            return;
-          }
-        }
-        
-        this.logger.log('info', '⏰ Auto-sync triggered');
+        this.logger.log('info', 'Auto-sync...');
         this.updateSyncStatus('syncing');
         
         try {
-          await this.firebase.pushLocalChats();
+          await this.firebase.syncAllChats();
           this.updateSyncStatus('success');
-          this.lastSyncTime = Date.now();
-          this.logger.log('success', '✅ Auto-sync completed');
         } catch (e) {
-          this.logger.log('error', 'Auto-sync failed', e.message);
+          this.logger.log('error', 'Auto-sync failed', e);
           this.updateSyncStatus('error');
         }
-      }, interval);
+      }, intervalMs);
       
-      this.logger.log('success', `⏰ Auto-sync started (every ${interval / 1000}s, min interval respected)`);
+      this.logger.log('success', `Auto-sync every ${intervalMs/1000}s`);
     }
   }
 
