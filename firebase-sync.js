@@ -445,8 +445,17 @@ if (window.typingMindFirebaseSync) {
               else textContent = JSON.stringify(m.content);
             }
 
+            let messageRole = 'user';
+            if (m.role && m.role !== 'undefined') {
+              messageRole = String(m.role);
+            } else if (m._reasoning_start || m.reasoning_content) {
+              messageRole = 'assistant';
+            } else if (m.model || m.usage) {
+              messageRole = 'assistant';
+            }
+
             const clean = {
-              role: String(m.role || 'user').slice(0, 50),
+              role: messageRole.slice(0, 50),
               content: String(textContent).slice(0, 100000),
               createdAt: this.validateTimestamp(m.createdAt, `${chatId}.msg[${idx}].createdAt`).toMillis()
             };
@@ -594,8 +603,17 @@ if (window.typingMindFirebaseSync) {
     }
 
     reconstructMessage(m) {
+      let messageRole = m.role || 'user';
+      if (messageRole === 'undefined' || !messageRole) {
+        if (m._reasoning_start || m.reasoning_content || m.model || m.usage) {
+          messageRole = 'assistant';
+        } else {
+          messageRole = 'user';
+        }
+      }
+
       const reconstructed = {
-        role: m.role,
+        role: messageRole,
         createdAt: new Date(m.createdAt).toISOString(),
       };
 
