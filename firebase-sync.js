@@ -607,6 +607,24 @@ if (window.typingMindFirebaseSync) {
             this.logger.log('warning', `${chatId}: Invalid msg ${idx}`);
             return false;
           }
+          
+          if (m.role === 'assistant' || m._reasoning_start || m.model) {
+            if (m._reasoning_start && !m._reasoning_finish) {
+              this.logger.log('warning', `${chatId}: Skip streaming msg ${idx} (thinking incomplete)`);
+              return false;
+            }
+            
+            const contentLength = typeof m.content === 'string' ? m.content.length : 0;
+            const createdAt = m.createdAt ? new Date(m.createdAt).getTime() : 0;
+            const now = Date.now();
+            const ageSeconds = (now - createdAt) / 1000;
+            
+            if (ageSeconds < 10 && contentLength < 50) {
+              this.logger.log('warning', `${chatId}: Skip potential streaming msg ${idx} (${contentLength} chars, ${ageSeconds.toFixed(0)}s old)`);
+              return false;
+            }
+          }
+          
           return true;
         })
         .map((m, idx) => {
