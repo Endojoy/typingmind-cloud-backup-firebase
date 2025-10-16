@@ -1,5 +1,5 @@
 /*──────────────────────────────────────────────────────────────
-  TypingMind – Firebase Cloud-Sync v3.4 FINAL (Oct-2025)
+  TypingMind – Firebase Cloud-Sync v3.6 FINAL (Oct-2025)
 ──────────────────────────────────────────────────────────────*/
 if (window.typingMindFirebaseSync) {
   console.log("Firebase Sync already loaded");
@@ -279,10 +279,15 @@ if (window.typingMindFirebaseSync) {
         this.logger.log('info', `Remote: ${remoteChats.length} chats`);
 
         let mergedCount = 0;
+        const mergedChatIds = [];
+        
         for (const remoteChat of remoteChats) {
           try {
             const wasMerged = await this.mergeRemoteChat(remoteChat);
-            if (wasMerged) mergedCount++;
+            if (wasMerged) {
+              mergedCount++;
+              mergedChatIds.push(remoteChat.id);
+            }
           } catch (error) {
             this.logger.log('error', `Merge failed: ${remoteChat.id}`, error.message);
           }
@@ -290,6 +295,12 @@ if (window.typingMindFirebaseSync) {
 
         if (mergedCount > 0) {
           this.logger.log('success', `Merged ${mergedCount} chats`);
+          
+          if (typeof window.dispatchEvent === 'function') {
+            window.dispatchEvent(new CustomEvent('tm-sync-refresh', { 
+              detail: { chatIds: mergedChatIds } 
+            }));
+          }
         }
 
         this.logger.log('success', 'SYNC COMPLETE');
@@ -370,6 +381,8 @@ if (window.typingMindFirebaseSync) {
       const title = chat.data.chatTitle || chat.data.title || chat.data.name || 'New Chat';
       const modelTitle = chat.data.modelInfo?.title || null;
       
+      const folderID = chat.data.folderID || chat.data.folderId || null;
+      
       const data = {
         id: chat.id,
         chatID: chat.data.chatID || chat.id,
@@ -378,7 +391,7 @@ if (window.typingMindFirebaseSync) {
         modelTitle: modelTitle,
         modelInfo: chat.data.modelInfo || null,
         selectedMultimodelIDs: chat.data.selectedMultimodelIDs || [],
-        folderId: chat.data.folderId || null,
+        folderID: folderID,
         chatParams: chat.data.chatParams || null,
         character: chat.data.character || null,
         linkedPlugins: chat.data.linkedPlugins || [],
@@ -391,10 +404,12 @@ if (window.typingMindFirebaseSync) {
       };
 
       const tokensInfo = chat.data.tokenUsage 
-        ? `${chat.data.tokenUsage.totalTokens || 0} tokens, $${(chat.data.tokenUsage.totalCostUSD || 0).toFixed(4)}`
-        : 'no usage';
+        ? `${chat.data.tokenUsage.totalTokens || 0}t $${(chat.data.tokenUsage.totalCostUSD || 0).toFixed(4)}`
+        : 'no-usage';
+      
+      const folderInfo = folderID ? `folder:${folderID}` : 'no-folder';
 
-      this.logger.log('info', `Upload: "${title}" [${modelTitle || 'no-model'}] (${messages.length} msgs, ${tokensInfo})`);
+      this.logger.log('info', `Upload [${chat.id}]: ${messages.length}msgs, ${tokensInfo}, ${folderInfo}`);
       
       await docRef.set(data);
     }
@@ -439,6 +454,11 @@ if (window.typingMindFirebaseSync) {
             if (m.uuid) clean.uuid = String(m.uuid).slice(0, 100);
             if (m.model) clean.model = String(m.model).slice(0, 100);
             if (m.usage) clean.usage = m.usage;
+            if (m.reasoning_content) clean.reasoning_content = String(m.reasoning_content).slice(0, 100000);
+            if (m.reasoning_summary) clean.reasoning_summary = m.reasoning_summary;
+            if (m.reasoning_details) clean.reasoning_details = m.reasoning_details;
+            if (m._reasoning_start) clean._reasoning_start = m._reasoning_start;
+            if (m._reasoning_finish) clean._reasoning_finish = m._reasoning_finish;
             
             return clean;
           } catch (error) {
@@ -475,7 +495,7 @@ if (window.typingMindFirebaseSync) {
           modelTitle: data.modelTitle || null,
           modelInfo: data.modelInfo || null,
           selectedMultimodelIDs: data.selectedMultimodelIDs || [],
-          folderId: data.folderId || null,
+          folderID: data.folderID || null,
           chatParams: data.chatParams || null,
           character: data.character || null,
           linkedPlugins: data.linkedPlugins || [],
@@ -509,25 +529,19 @@ if (window.typingMindFirebaseSync) {
               model: remoteChat.model,
               modelInfo: remoteChat.modelInfo,
               selectedMultimodelIDs: remoteChat.selectedMultimodelIDs || [],
-              folderId: remoteChat.folderId,
+              folderID: remoteChat.folderID,
               chatParams: remoteChat.chatParams,
               character: remoteChat.character,
               linkedPlugins: remoteChat.linkedPlugins || [],
               tokenUsage: remoteChat.tokenUsage,
-              messages: remoteChat.messages.map(m => ({
-                ...m,
-                content: typeof m.content === 'string' 
-                  ? [{type: 'text', text: m.content}] 
-                  : (Array.isArray(m.content) ? m.content : [{type: 'text', text: String(m.content)}]),
-                createdAt: new Date(m.createdAt).toISOString(),
-              })),
+              messages: remoteChat.messages.map(m => this.reconstructMessage(m)),
               createdAt: new Date(remoteChat.createdAt).toISOString(),
               updatedAt: new Date(remoteChat.updatedAt).toISOString(),
               syncedAt: Date.now()
             };
             
             store.put(newChat, chatKey).onsuccess = () => {
-              this.logger.log('info', `Created: ${remoteChat.chatTitle}`);
+              this.logger.log('info', `Created [${remoteChat.id}]: folder:${remoteChat.folderID || 'none'}`);
               this.lastSyncTimestamps[remoteChat.id] = Date.now();
               resolve(true);
             };
@@ -544,36 +558,53 @@ if (window.typingMindFirebaseSync) {
             if (remoteChat.model) localChat.model = remoteChat.model;
             if (remoteChat.modelInfo) localChat.modelInfo = remoteChat.modelInfo;
             if (remoteChat.selectedMultimodelIDs) localChat.selectedMultimodelIDs = remoteChat.selectedMultimodelIDs;
-            if (remoteChat.folderId !== undefined) localChat.folderId = remoteChat.folderId;
+            if (remoteChat.folderID !== undefined) localChat.folderID = remoteChat.folderID;
             if (remoteChat.chatParams) localChat.chatParams = remoteChat.chatParams;
             if (remoteChat.character !== undefined) localChat.character = remoteChat.character;
             if (remoteChat.linkedPlugins) localChat.linkedPlugins = remoteChat.linkedPlugins;
             if (remoteChat.tokenUsage) localChat.tokenUsage = remoteChat.tokenUsage;
             
-            localChat.messages = remoteChat.messages.map(m => ({
-              ...m,
-              content: typeof m.content === 'string' 
-                ? [{type: 'text', text: m.content}] 
-                : (Array.isArray(m.content) ? m.content : [{type: 'text', text: String(m.content)}]),
-              createdAt: new Date(m.createdAt).toISOString(),
-            }));
+            localChat.messages = remoteChat.messages.map(m => this.reconstructMessage(m));
             
             localChat.updatedAt = new Date(remoteChat.updatedAt).toISOString();
             localChat.syncedAt = Date.now();
             
             store.put(localChat, chatKey).onsuccess = () => {
-              this.logger.log('info', `Updated: ${remoteChat.chatTitle}`);
+              this.logger.log('info', `Updated [${remoteChat.id}]: folder:${remoteChat.folderID || 'none'}`);
               this.lastSyncTimestamps[remoteChat.id] = Date.now();
               resolve(true);
             };
           } else {
-            this.logger.log('info', `Skip: ${remoteChat.chatTitle}`);
+            this.logger.log('info', `Skip [${remoteChat.id}]`);
             resolve(false);
           }
         };
 
         getReq.onerror = reject;
       });
+    }
+
+    reconstructMessage(m) {
+      const reconstructed = {
+        ...m,
+        createdAt: new Date(m.createdAt).toISOString(),
+      };
+
+      if (typeof m.content === 'string') {
+        reconstructed.content = [{type: 'text', text: m.content}];
+      } else if (Array.isArray(m.content)) {
+        reconstructed.content = m.content;
+      } else {
+        reconstructed.content = [{type: 'text', text: String(m.content)}];
+      }
+
+      if (m.reasoning_content) reconstructed.reasoning_content = m.reasoning_content;
+      if (m.reasoning_summary) reconstructed.reasoning_summary = m.reasoning_summary;
+      if (m.reasoning_details) reconstructed.reasoning_details = m.reasoning_details;
+      if (m._reasoning_start) reconstructed._reasoning_start = m._reasoning_start;
+      if (m._reasoning_finish) reconstructed._reasoning_finish = m._reasoning_finish;
+
+      return reconstructed;
     }
 
     async getIndexedDB() {
@@ -602,10 +633,57 @@ if (window.typingMindFirebaseSync) {
       this.config = new ConfigManager();
       this.firebase = new FirebaseService(this.config, this.logger);
       this.autoSyncInterval = null;
+      this.setupAutoRefresh();
     }
     
+    setupAutoRefresh() {
+      window.addEventListener('tm-sync-refresh', (e) => {
+        this.logger.log('success', `✅ ${e.detail.chatIds.length} chats synced silently`);
+        
+        this.showSyncNotification(e.detail.chatIds.length);
+      });
+    }
+
+    showSyncNotification(count) {
+      const notif = document.createElement('div');
+      notif.style.cssText = `
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        background: #22c55e;
+        color: white;
+        padding: 12px 20px;
+        border-radius: 8px;
+        font-size: 14px;
+        z-index: 10000;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+        animation: slideIn 0.3s ease-out;
+      `;
+      notif.textContent = `✅ ${count} chat${count > 1 ? 's' : ''} synced`;
+      
+      const style = document.createElement('style');
+      style.textContent = `
+        @keyframes slideIn {
+          from { transform: translateX(400px); opacity: 0; }
+          to { transform: translateX(0); opacity: 1; }
+        }
+        @keyframes slideOut {
+          from { transform: translateX(0); opacity: 1; }
+          to { transform: translateX(400px); opacity: 0; }
+        }
+      `;
+      document.head.appendChild(style);
+      
+      document.body.appendChild(notif);
+      
+      setTimeout(() => {
+        notif.style.animation = 'slideOut 0.3s ease-in';
+        setTimeout(() => notif.remove(), 300);
+      }, 3000);
+    }
+        
     async initialize() {
-      this.logger.log('start', 'Firebase Sync v3.4 FINAL');
+      this.logger.log('start', 'Firebase Sync v3.6 FINAL');
       await this.waitForDOM();
       this.insertSyncButton();
 
@@ -707,7 +785,7 @@ if (window.typingMindFirebaseSync) {
       
       modal.innerHTML = `
         <div class="text-white text-sm">
-          <h3 class="text-center text-xl font-bold mb-4">Firebase Sync v3.4</h3>
+          <h3 class="text-center text-xl font-bold mb-4">Firebase Sync v3.6</h3>
           
           <div class="bg-blue-900/30 border border-blue-700 rounded p-3 mb-4 text-xs">
             <strong>Setup:</strong><br>
@@ -761,7 +839,7 @@ if (window.typingMindFirebaseSync) {
           <div id="action-msg" class="text-center text-sm text-zinc-400"></div>
           
           <div class="text-center mt-4 pt-3 text-xs text-zinc-500 border-t border-zinc-700">
-            v3.4 FINAL - Device: ${this.firebase.deviceId.substr(0, 15)}... - Add ?log=true for debug
+            v3.6 FINAL - Device: ${this.firebase.deviceId.substr(0, 15)}... - Add ?log=true for debug
           </div>
         </div>`;
       
