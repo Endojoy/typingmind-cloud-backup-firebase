@@ -454,11 +454,19 @@ if (window.typingMindFirebaseSync) {
             if (m.uuid) clean.uuid = String(m.uuid).slice(0, 100);
             if (m.model) clean.model = String(m.model).slice(0, 100);
             if (m.usage) clean.usage = m.usage;
+            
             if (m.reasoning_content) clean.reasoning_content = String(m.reasoning_content).slice(0, 100000);
             if (m.reasoning_summary) clean.reasoning_summary = m.reasoning_summary;
             if (m.reasoning_details) clean.reasoning_details = m.reasoning_details;
             if (m._reasoning_start) clean._reasoning_start = m._reasoning_start;
             if (m._reasoning_finish) clean._reasoning_finish = m._reasoning_finish;
+            
+            if (typeof m.content === 'string') {
+              clean._contentType = 'string';
+            } else if (Array.isArray(m.content)) {
+              clean._contentType = 'array';
+              clean._originalContent = m.content;
+            }
             
             return clean;
           } catch (error) {
@@ -471,6 +479,7 @@ if (window.typingMindFirebaseSync) {
           }
         });
     }
+
 
     async downloadAllChats() {
       const workspaceId = this.config.get('workspaceId');
@@ -586,17 +595,23 @@ if (window.typingMindFirebaseSync) {
 
     reconstructMessage(m) {
       const reconstructed = {
-        ...m,
+        role: m.role,
         createdAt: new Date(m.createdAt).toISOString(),
       };
 
-      if (typeof m.content === 'string') {
-        reconstructed.content = [{type: 'text', text: m.content}];
-      } else if (Array.isArray(m.content)) {
+      if (m._contentType === 'string') {
         reconstructed.content = m.content;
+      } else if (m._contentType === 'array' && m._originalContent) {
+        reconstructed.content = m._originalContent;
+      } else if (typeof m.content === 'string') {
+        reconstructed.content = [{type: 'text', text: m.content}];
       } else {
-        reconstructed.content = [{type: 'text', text: String(m.content)}];
+        reconstructed.content = m.content;
       }
+
+      if (m.uuid) reconstructed.uuid = m.uuid;
+      if (m.model) reconstructed.model = m.model;
+      if (m.usage) reconstructed.usage = m.usage;
 
       if (m.reasoning_content) reconstructed.reasoning_content = m.reasoning_content;
       if (m.reasoning_summary) reconstructed.reasoning_summary = m.reasoning_summary;
