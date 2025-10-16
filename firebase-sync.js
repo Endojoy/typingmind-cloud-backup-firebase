@@ -1,5 +1,5 @@
 /*──────────────────────────────────────────────────────────────
-  TypingMind – Firebase Sync v3.4 (Oct-2025) - MULTI-DEVICE FIX
+  TypingMind – Firebase Cloud-Sync v3.4 FINAL (Oct-2025)
 ──────────────────────────────────────────────────────────────*/
 if (window.typingMindFirebaseSync) {
   console.log("Firebase Sync already loaded");
@@ -20,7 +20,7 @@ if (window.typingMindFirebaseSync) {
         projectId: '',
         storageBucket: '',
         syncInterval: 60,
-        workspaceId: '',      
+        workspaceId: '',
       };
       const stored = {};
       const keyMap = {
@@ -86,7 +86,7 @@ if (window.typingMindFirebaseSync) {
   }
 
   /* ============================================================
-     FIREBASE SERVICE - MULTI-DEVICE
+     FIREBASE SERVICE
   ============================================================ */
   class FirebaseService {
     constructor(config, logger) {
@@ -122,7 +122,7 @@ if (window.typingMindFirebaseSync) {
       const script = document.createElement('script');
       script.id = 'firebase-compat';
       script.src = 'https://unpkg.com/firebase@9.22.2/firebase-compat.js';
-      script.crossorigin = 'anonymous';
+      script.crossOrigin = 'anonymous';
       
       await new Promise((resolve, reject) => {
         script.onload = resolve;
@@ -166,12 +166,16 @@ if (window.typingMindFirebaseSync) {
 
       if (!firebase.auth().currentUser) {
         try {
+          this.logger.log('info', 'Anonymous sign-in...');
           const result = await firebase.auth().signInAnonymously();
           this.userId = result.user.uid;
-          this.logger.log('success', `Signed in anonymously: ${this.userId.substr(0, 8)}...`);
+          this.logger.log('success', `Signed in: ${this.userId.substr(0, 8)}...`);
         } catch (error) {
           if (error.code === 'auth/operation-not-allowed') {
-            throw new Error('⚠️ Enable Anonymous auth in Firebase Console\n\nGo to: Firebase Console → Authentication → Sign-in method → Enable Anonymous');
+            throw new Error('⚠️ Enable Anonymous auth in Firebase Console');
+          }
+          if (error.code === 'auth/api-not-enabled' || error.message.includes('identity-toolkit-api')) {
+            throw new Error('⏳ Firebase API not ready. Wait 10min or clear cache (Ctrl+Shift+R)');
           }
           throw error;
         }
@@ -240,7 +244,7 @@ if (window.typingMindFirebaseSync) {
       }
 
       this.isSyncing = true;
-      this.logger.log('start', '🔄 Smart sync...');
+      this.logger.log('start', 'Smart sync...');
 
       try {
         const localChats = await this.getAllLocalChats();
@@ -249,7 +253,8 @@ if (window.typingMindFirebaseSync) {
         const chatsToUpload = localChats.filter(chat => {
           const lastSync = this.lastSyncTimestamps[chat.id] || 0;
           const chatUpdated = chat.data.updatedAt || 0;
-          return chatUpdated > lastSync;
+          const chatUpdatedMs = typeof chatUpdated === 'string' ? Date.parse(chatUpdated) : chatUpdated;
+          return chatUpdatedMs > lastSync;
         });
 
         this.logger.log('info', `To upload: ${chatsToUpload.length} chats`);
@@ -266,7 +271,7 @@ if (window.typingMindFirebaseSync) {
         }
 
         if (uploadedCount > 0) {
-          this.logger.log('success', `✅ Uploaded ${uploadedCount} chats`);
+          this.logger.log('success', `Uploaded ${uploadedCount} chats`);
           this.saveLastSyncTimestamps();
         }
 
@@ -284,10 +289,10 @@ if (window.typingMindFirebaseSync) {
         }
 
         if (mergedCount > 0) {
-          this.logger.log('success', `✅ Merged ${mergedCount} chats`);
+          this.logger.log('success', `Merged ${mergedCount} chats`);
         }
 
-        this.logger.log('success', '✅ SYNC COMPLETE');
+        this.logger.log('success', 'SYNC COMPLETE');
 
       } catch (error) {
         this.logger.log('error', 'Sync failed', error);
@@ -354,13 +359,30 @@ if (window.typingMindFirebaseSync) {
         .collection('chats')
         .doc(chat.id);
       
-      const createdAt = this.validateTimestamp(chat.data.createdAt, `${chat.id}.createdAt`);
-      const updatedAt = this.validateTimestamp(chat.data.updatedAt, `${chat.id}.updatedAt`);
+      const createdAtValue = chat.data.createdAt;
+      const updatedAtValue = chat.data.updatedAt;
+      
+      const createdAt = this.validateTimestamp(createdAtValue, `${chat.id}.createdAt`);
+      const updatedAt = this.validateTimestamp(updatedAtValue, `${chat.id}.updatedAt`);
+      
       const messages = this.sanitizeMessages(chat.data.messages || [], chat.id);
 
+      const title = chat.data.chatTitle || chat.data.title || chat.data.name || 'New Chat';
+      const modelTitle = chat.data.modelInfo?.title || null;
+      
       const data = {
         id: chat.id,
-        title: String(chat.data.title || chat.data.name || 'Chat').slice(0, 500),
+        chatID: chat.data.chatID || chat.id,
+        chatTitle: String(title).slice(0, 500),
+        model: chat.data.model || null,
+        modelTitle: modelTitle,
+        modelInfo: chat.data.modelInfo || null,
+        selectedMultimodelIDs: chat.data.selectedMultimodelIDs || [],
+        folderId: chat.data.folderId || null,
+        chatParams: chat.data.chatParams || null,
+        character: chat.data.character || null,
+        linkedPlugins: chat.data.linkedPlugins || [],
+        tokenUsage: chat.data.tokenUsage || null,
         messages: messages,
         createdAt: createdAt,
         updatedAt: updatedAt,
@@ -368,12 +390,20 @@ if (window.typingMindFirebaseSync) {
         lastDevice: this.deviceId,
       };
 
+      const tokensInfo = chat.data.tokenUsage 
+        ? `${chat.data.tokenUsage.totalTokens || 0} tokens, $${(chat.data.tokenUsage.totalCostUSD || 0).toFixed(4)}`
+        : 'no usage';
+
+      this.logger.log('info', `Upload: "${title}" [${modelTitle || 'no-model'}] (${messages.length} msgs, ${tokensInfo})`);
+      
       await docRef.set(data);
-      this.logger.log('info', `📤 ${chat.id} (${messages.length} msgs)`);
     }
 
     sanitizeMessages(messages, chatId) {
-      if (!Array.isArray(messages)) return [];
+      if (!Array.isArray(messages)) {
+        this.logger.log('warning', `${chatId}: messages not array`);
+        return [];
+      }
       
       return messages
         .filter((m, idx) => {
@@ -385,24 +415,37 @@ if (window.typingMindFirebaseSync) {
         })
         .map((m, idx) => {
           try {
+            let textContent = '';
+            
+            if (typeof m.content === 'string') {
+              textContent = m.content;
+            } else if (Array.isArray(m.content)) {
+              textContent = m.content
+                .filter(part => part && part.type === 'text' && part.text)
+                .map(part => part.text)
+                .join('\n');
+            } else if (m.content && typeof m.content === 'object') {
+              if (m.content.text) textContent = m.content.text;
+              else if (m.content.content) textContent = m.content.content;
+              else textContent = JSON.stringify(m.content);
+            }
+
             const clean = {
               role: String(m.role || 'user').slice(0, 50),
-              content: String(m.content || '').slice(0, 100000),
-              createdAt: this.validateTimestamp(m.createdAt || m.timestamp, `${chatId}.msg[${idx}].createdAt`).toMillis()
+              content: String(textContent).slice(0, 100000),
+              createdAt: this.validateTimestamp(m.createdAt, `${chatId}.msg[${idx}].createdAt`).toMillis()
             };
             
-            if (m.id) clean.id = String(m.id).slice(0, 100);
+            if (m.uuid) clean.uuid = String(m.uuid).slice(0, 100);
             if (m.model) clean.model = String(m.model).slice(0, 100);
-            if (m.plugin_name) clean.plugin_name = String(m.plugin_name).slice(0, 100);
-            if (m.updatedAt) {
-              clean.updatedAt = this.validateTimestamp(m.updatedAt, `${chatId}.msg[${idx}].updatedAt`).toMillis();
-            }
+            if (m.usage) clean.usage = m.usage;
             
             return clean;
           } catch (error) {
+            this.logger.log('error', `${chatId}: Failed msg ${idx}`, error.message);
             return {
               role: 'user',
-              content: '[Invalid message]',
+              content: '[Error parsing message]',
               createdAt: Date.now()
             };
           }
@@ -426,7 +469,17 @@ if (window.typingMindFirebaseSync) {
         
         return {
           id: doc.id,
-          title: data.title || 'Chat',
+          chatID: data.chatID || doc.id,
+          chatTitle: data.chatTitle || 'New Chat',
+          model: data.model || null,
+          modelTitle: data.modelTitle || null,
+          modelInfo: data.modelInfo || null,
+          selectedMultimodelIDs: data.selectedMultimodelIDs || [],
+          folderId: data.folderId || null,
+          chatParams: data.chatParams || null,
+          character: data.character || null,
+          linkedPlugins: data.linkedPlugins || [],
+          tokenUsage: data.tokenUsage || null,
           messages: Array.isArray(data.messages) ? data.messages : [],
           createdAt: this.isValidMillis(createdAtMillis) ? createdAtMillis : Date.now(),
           updatedAt: this.isValidMillis(updatedAtMillis) ? updatedAtMillis : Date.now(),
@@ -451,37 +504,70 @@ if (window.typingMindFirebaseSync) {
           if (!localChat) {
             const newChat = {
               id: remoteChat.id,
-              title: remoteChat.title,
-              messages: remoteChat.messages,
-              createdAt: remoteChat.createdAt,
-              updatedAt: remoteChat.updatedAt,
+              chatID: remoteChat.chatID || remoteChat.id,
+              chatTitle: remoteChat.chatTitle,
+              model: remoteChat.model,
+              modelInfo: remoteChat.modelInfo,
+              selectedMultimodelIDs: remoteChat.selectedMultimodelIDs || [],
+              folderId: remoteChat.folderId,
+              chatParams: remoteChat.chatParams,
+              character: remoteChat.character,
+              linkedPlugins: remoteChat.linkedPlugins || [],
+              tokenUsage: remoteChat.tokenUsage,
+              messages: remoteChat.messages.map(m => ({
+                ...m,
+                content: typeof m.content === 'string' 
+                  ? [{type: 'text', text: m.content}] 
+                  : (Array.isArray(m.content) ? m.content : [{type: 'text', text: String(m.content)}]),
+                createdAt: new Date(m.createdAt).toISOString(),
+              })),
+              createdAt: new Date(remoteChat.createdAt).toISOString(),
+              updatedAt: new Date(remoteChat.updatedAt).toISOString(),
               syncedAt: Date.now()
             };
             
             store.put(newChat, chatKey).onsuccess = () => {
-              this.logger.log('info', `📥 Created: ${remoteChat.id}`);
+              this.logger.log('info', `Created: ${remoteChat.chatTitle}`);
               this.lastSyncTimestamps[remoteChat.id] = Date.now();
               resolve(true);
             };
             return;
           }
 
-          const localTime = localChat.updatedAt || 0;
+          const localTime = typeof localChat.updatedAt === 'string' 
+            ? Date.parse(localChat.updatedAt) 
+            : (localChat.updatedAt || 0);
           const remoteTime = remoteChat.updatedAt || 0;
 
           if (remoteTime > localTime && remoteChat.lastDevice !== this.deviceId) {
-            localChat.title = remoteChat.title;
-            localChat.messages = remoteChat.messages;
-            localChat.updatedAt = remoteChat.updatedAt;
+            localChat.chatTitle = remoteChat.chatTitle;
+            if (remoteChat.model) localChat.model = remoteChat.model;
+            if (remoteChat.modelInfo) localChat.modelInfo = remoteChat.modelInfo;
+            if (remoteChat.selectedMultimodelIDs) localChat.selectedMultimodelIDs = remoteChat.selectedMultimodelIDs;
+            if (remoteChat.folderId !== undefined) localChat.folderId = remoteChat.folderId;
+            if (remoteChat.chatParams) localChat.chatParams = remoteChat.chatParams;
+            if (remoteChat.character !== undefined) localChat.character = remoteChat.character;
+            if (remoteChat.linkedPlugins) localChat.linkedPlugins = remoteChat.linkedPlugins;
+            if (remoteChat.tokenUsage) localChat.tokenUsage = remoteChat.tokenUsage;
+            
+            localChat.messages = remoteChat.messages.map(m => ({
+              ...m,
+              content: typeof m.content === 'string' 
+                ? [{type: 'text', text: m.content}] 
+                : (Array.isArray(m.content) ? m.content : [{type: 'text', text: String(m.content)}]),
+              createdAt: new Date(m.createdAt).toISOString(),
+            }));
+            
+            localChat.updatedAt = new Date(remoteChat.updatedAt).toISOString();
             localChat.syncedAt = Date.now();
             
             store.put(localChat, chatKey).onsuccess = () => {
-              this.logger.log('info', `📥 Updated: ${remoteChat.id}`);
+              this.logger.log('info', `Updated: ${remoteChat.chatTitle}`);
               this.lastSyncTimestamps[remoteChat.id] = Date.now();
               resolve(true);
             };
           } else {
-            this.logger.log('info', `⏭️ Skip: ${remoteChat.id}`);
+            this.logger.log('info', `Skip: ${remoteChat.chatTitle}`);
             resolve(false);
           }
         };
@@ -519,7 +605,7 @@ if (window.typingMindFirebaseSync) {
     }
     
     async initialize() {
-      this.logger.log('start', '🚀 Firebase Sync v3.4 MULTI-DEVICE');
+      this.logger.log('start', 'Firebase Sync v3.4 FINAL');
       await this.waitForDOM();
       this.insertSyncButton();
 
@@ -542,7 +628,7 @@ if (window.typingMindFirebaseSync) {
           this.logger.log('error', 'Init failed', e);
           this.updateSyncStatus('error');
           
-          if (e.message.includes('Enable Anonymous')) {
+          if (e.message.includes('Enable Anonymous') || e.message.includes('Firebase API not ready')) {
             alert(e.message);
           }
         }
@@ -624,14 +710,14 @@ if (window.typingMindFirebaseSync) {
           <h3 class="text-center text-xl font-bold mb-4">Firebase Sync v3.4</h3>
           
           <div class="bg-blue-900/30 border border-blue-700 rounded p-3 mb-4 text-xs">
-            <strong>🔧 Setup (ONE TIME):</strong><br>
+            <strong>Setup:</strong><br>
             1. Enable <strong>Anonymous</strong> auth in Firebase Console<br>
             &nbsp;&nbsp;&nbsp;→ Authentication → Sign-in method → Anonymous<br>
             2. Choose a <strong>Workspace ID</strong> (ex: my-workspace)<br>
             3. Use <strong>SAME Workspace ID</strong> on all devices<br>
             <br>
-            <strong>✅ Each device = separate anonymous account</strong><br>
-            <strong>✅ All devices share the same workspace</strong>
+            Each device = separate anonymous account<br>
+            All devices share the same workspace
           </div>
           
           <div class="space-y-3 mb-4">
@@ -654,9 +740,9 @@ if (window.typingMindFirebaseSync) {
             
             <div class="pt-3 border-t border-zinc-700">
               <div>
-                <label class="block text-xs text-zinc-400 mb-1">🏢 Workspace ID (same on all devices)</label>
+                <label class="block text-xs text-zinc-400 mb-1">Workspace ID (same on all devices)</label>
                 <input id="fb-workspaceId" placeholder="my-workspace" style="width:100%;padding:8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff" value="${this.config.get('workspaceId')}">
-                <p class="text-xs text-zinc-500 mt-1">💡 Share this ID with your other devices</p>
+                <p class="text-xs text-zinc-500 mt-1">Share this ID with your other devices</p>
               </div>
             </div>
             
@@ -675,7 +761,7 @@ if (window.typingMindFirebaseSync) {
           <div id="action-msg" class="text-center text-sm text-zinc-400"></div>
           
           <div class="text-center mt-4 pt-3 text-xs text-zinc-500 border-t border-zinc-700">
-            v3.4 MULTI-DEVICE - Device: ${this.firebase.deviceId.substr(0, 15)}...
+            v3.4 FINAL - Device: ${this.firebase.deviceId.substr(0, 15)}... - Add ?log=true for debug
           </div>
         </div>`;
       
@@ -705,13 +791,13 @@ if (window.typingMindFirebaseSync) {
       };
 
       if (!newConfig.apiKey || !newConfig.authDomain || !newConfig.projectId || !newConfig.storageBucket) {
-        actionMsg.textContent = '❌ Fill all Firebase fields';
+        actionMsg.textContent = 'Fill all Firebase fields';
         actionMsg.style.color = '#ef4444';
         return;
       }
 
       if (!newConfig.workspaceId) {
-        actionMsg.textContent = '❌ Workspace ID required';
+        actionMsg.textContent = 'Workspace ID required';
         actionMsg.style.color = '#ef4444';
         return;
       }
@@ -719,7 +805,7 @@ if (window.typingMindFirebaseSync) {
       Object.keys(newConfig).forEach(k => this.config.set(k, newConfig[k]));
       this.config.save();
 
-      actionMsg.textContent = '✅ Saved! Reloading...';
+      actionMsg.textContent = 'Saved! Reloading...';
       actionMsg.style.color = '#22c55e';
       
       setTimeout(() => window.location.reload(), 1000);
@@ -735,11 +821,11 @@ if (window.typingMindFirebaseSync) {
 
       try {
         await this.firebase.syncAllChats();
-        actionMsg.textContent = '✅ Sync complete!';
+        actionMsg.textContent = 'Sync complete!';
         actionMsg.style.color = '#22c55e';
         this.updateSyncStatus('success');
       } catch (e) {
-        actionMsg.textContent = `❌ ${e.message}`;
+        actionMsg.textContent = e.message;
         actionMsg.style.color = '#ef4444';
         this.updateSyncStatus('error');
       } finally {
@@ -758,7 +844,7 @@ if (window.typingMindFirebaseSync) {
       this.autoSyncInterval = setInterval(async () => {
         if (this.firebase.isSyncing) return;
         
-        this.logger.log('info', '⏰ Auto-sync...');
+        this.logger.log('info', 'Auto-sync...');
         this.updateSyncStatus('syncing');
         
         try {
