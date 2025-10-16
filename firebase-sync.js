@@ -1,5 +1,5 @@
 /*──────────────────────────────────────────────────────────────
-  TypingMind – Firebase Cloud-Sync v3.7 FINAL (Oct-2025)
+  TypingMind – Firebase Cloud-Sync v1.0 (Oct-2025)
 ──────────────────────────────────────────────────────────────*/
 if (window.typingMindFirebaseSync) {
   console.log("Firebase Sync already loaded");
