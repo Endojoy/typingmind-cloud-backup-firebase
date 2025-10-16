@@ -89,9 +89,10 @@ if (window.typingMindFirebaseSync) {
      FIREBASE SERVICE
   ============================================================ */
   class FirebaseService {
-    constructor(config, logger) {
+    constructor(config, logger, cloudSyncApp = null) {
       this.config = config;
       this.logger = logger;
+      this.cloudSyncApp = cloudSyncApp;
       this.app = null;
       this.db = null;
       this.deviceId = this.getDeviceId();
@@ -337,6 +338,13 @@ if (window.typingMindFirebaseSync) {
           const updatedLocalChats = await this.getAllLocalChats();
           localChats.length = 0;
           localChats.push(...updatedLocalChats);
+
+          if (this.cloudSyncApp) {
+            this.cloudSyncApp.showSyncNotification(toDeleteLocally.length, 'deleted');
+            setTimeout(() => {
+              this.cloudSyncApp.triggerSoftRefresh();
+            }, 500);
+          }
         }
 
         const currentLocalIds = localChats.map(c => c.id);
@@ -404,10 +412,11 @@ if (window.typingMindFirebaseSync) {
         if (mergedCount > 0) {
           this.logger.log('success', `Merged ${mergedCount} chats`);
           
-          if (typeof window.dispatchEvent === 'function') {
-            window.dispatchEvent(new CustomEvent('tm-sync-refresh', { 
-              detail: { chatIds: mergedChatIds } 
-            }));
+          if (this.cloudSyncApp) {
+            this.cloudSyncApp.showSyncNotification(mergedCount, 'synced');
+            setTimeout(() => {
+              this.cloudSyncApp.triggerSoftRefresh();
+            }, 500);
           }
         }
 
@@ -836,7 +845,7 @@ if (window.typingMindFirebaseSync) {
     constructor() {
       this.logger = new Logger();
       this.config = new ConfigManager();
-      this.firebase = new FirebaseService(this.config, this.logger);
+      this.firebase = new FirebaseService(this.config, this.logger, this);
       this.autoSyncInterval = null;
       this.setupAutoRefresh();
     }
@@ -844,9 +853,11 @@ if (window.typingMindFirebaseSync) {
     setupAutoRefresh() {
       window.addEventListener('tm-sync-refresh', (e) => {
         const count = e.detail.chatIds.length;
-        this.logger.log('success', `Refreshing UI for ${count} synced chats`);
+        const action = e.detail.action || 'synced';
         
-        this.showSyncNotification(count);
+        this.logger.log('success', `Refreshing UI for ${count} ${action} chats`);
+        
+        this.showSyncNotification(count, action);
         
         setTimeout(() => {
           this.triggerSoftRefresh();
@@ -864,17 +875,24 @@ if (window.typingMindFirebaseSync) {
       }
     }
 
-    showSyncNotification(count) {
+    showSyncNotification(count, action = 'synced') {
       const existingNotif = document.querySelector('.tm-sync-notification');
       if (existingNotif) existingNotif.remove();
 
       const notif = document.createElement('div');
       notif.className = 'tm-sync-notification';
+      
+      const bgColor = action === 'deleted' ? '#ef4444' : '#22c55e';
+      const icon = action === 'deleted' ? '🗑️' : '✓';
+      const text = action === 'deleted' 
+        ? `${count} chat${count > 1 ? 's' : ''} deleted`
+        : `${count} chat${count > 1 ? 's' : ''} synced`;
+      
       notif.style.cssText = `
         position: fixed;
         bottom: 20px;
         right: 20px;
-        background: #22c55e;
+        background: ${bgColor};
         color: white;
         padding: 12px 20px;
         border-radius: 8px;
@@ -885,7 +903,7 @@ if (window.typingMindFirebaseSync) {
         animation: slideIn 0.3s ease-out;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       `;
-      notif.textContent = `✓ ${count} chat${count > 1 ? 's' : ''} synced`;
+      notif.textContent = `${icon} ${text}`;
       
       const style = document.createElement('style');
       style.textContent = `
