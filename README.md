@@ -313,8 +313,8 @@ MIT License - feel free to use and modify!
 
 ## 💬 Support
 
-- **Issues**: [GitHub Issues](https://github.com/yourusername/typingmind-firebase-sync/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/typingmind-firebase-sync/discussions)
+- **Issues**: [GitHub Issues](https://github.com/Endojoy/typingmind-cloud-backup-firebase/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/Endojoy/typingmind-cloud-backup-firebase/discussions)
 
 ## 🙏 Acknowledgments
 
