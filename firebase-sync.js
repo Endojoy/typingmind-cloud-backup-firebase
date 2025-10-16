@@ -284,11 +284,62 @@ if (window.typingMindFirebaseSync) {
       }
 
       this.isSyncing = true;
-      this.logger.log('start', 'Smart sync with deletion tracking...');
+      this.logger.log('start', 'Smart sync with folders & deletion tracking...');
 
       try {
+        this.logger.log('info', '📁 Syncing folders...');
+        
+        const remoteDeletedFolderIds = await this.downloadDeletedFolderIds();
+        this.logger.log('info', `Remote folder deletions: ${remoteDeletedFolderIds.length}`);
+
+        const localFolders = await this.getAllLocalFolders();
+        const localFolderIds = localFolders.map(f => f.id);
+        this.logger.log('info', `Local folders: ${localFolders.length}`);
+
+        for (const folder of localFolders) {
+          if (!remoteDeletedFolderIds.includes(folder.id)) {
+            try {
+              await this.uploadFolder(folder);
+            } catch (error) {
+              this.logger.log('error', `Folder upload failed: ${folder.id}`, error.message);
+            }
+          }
+        }
+
+        const remoteFolders = await this.downloadAllFolders();
+        this.logger.log('info', `Remote folders: ${remoteFolders.length}`);
+        
+        let foldersCreated = 0;
+        for (const remoteFolder of remoteFolders) {
+          try {
+            const wasCreated = await this.mergeRemoteFolder(remoteFolder);
+            if (wasCreated) foldersCreated++;
+          } catch (error) {
+            this.logger.log('error', `Folder merge failed: ${remoteFolder.id}`, error.message);
+          }
+        }
+
+        if (foldersCreated > 0) {
+          this.logger.log('success', `Created ${foldersCreated} folders`);
+        }
+
+        const foldersToDeleteLocally = localFolderIds.filter(id => 
+          remoteDeletedFolderIds.includes(id)
+        );
+
+        if (foldersToDeleteLocally.length > 0) {
+          this.logger.log('warning', `Deleting ${foldersToDeleteLocally.length} folders locally`);
+          for (const folderId of foldersToDeleteLocally) {
+            try {
+              await this.deleteLocalFolder(folderId);
+            } catch (error) {
+              this.logger.log('error', `Failed to delete folder ${folderId}`, error.message);
+            }
+          }
+        }
+
         const remoteDeletedIds = await this.downloadDeletedChatIds();
-        this.logger.log('info', `Remote deletions: ${remoteDeletedIds.length}`);
+        this.logger.log('info', `Remote chat deletions: ${remoteDeletedIds.length}`);
 
         for (const deletedId of remoteDeletedIds) {
           if (!this.isChatDeleted(deletedId)) {
@@ -298,7 +349,7 @@ if (window.typingMindFirebaseSync) {
 
         const localChats = await this.getAllLocalChats();
         const localChatIds = localChats.map(c => c.id);
-        this.logger.log('info', `Local: ${localChats.length} chats`);
+        this.logger.log('info', `Local chats: ${localChats.length}`);
 
         const lastKnownIds = this.getLastKnownChatIds();
         const deletedLocally = lastKnownIds.filter(id => 
@@ -387,7 +438,7 @@ if (window.typingMindFirebaseSync) {
         }
 
         const remoteChats = await this.downloadAllChats();
-        this.logger.log('info', `Remote: ${remoteChats.length} chats`);
+        this.logger.log('info', `Remote chats: ${remoteChats.length}`);
 
         let mergedCount = 0;
         const mergedChatIds = [];
@@ -540,6 +591,182 @@ if (window.typingMindFirebaseSync) {
 
         store.openCursor().onerror = reject;
       });
+    }
+
+    async getAllLocalFolders() {
+      const idb = await this.getIndexedDB();
+      return new Promise((resolve, reject) => {
+        const tx = idb.transaction(['keyval'], 'readonly');
+        const store = tx.objectStore('keyval');
+        const folders = [];
+
+        store.openCursor().onsuccess = (e) => {
+          const cursor = e.target.result;
+          if (!cursor) {
+            resolve(folders);
+            return;
+          }
+
+          const key = cursor.key;
+          if (typeof key === 'string' && key.startsWith('FOLDER_')) {
+            const folder = cursor.value;
+            folders.push({
+              id: key.replace('FOLDER_', ''),
+              data: folder
+            });
+          }
+          cursor.continue();
+        };
+
+        store.openCursor().onerror = reject;
+      });
+    }
+
+    async uploadFolder(folder) {
+      const workspaceId = this.config.get('workspaceId');
+      
+      const docRef = this.db
+        .collection('workspaces')
+        .doc(workspaceId)
+        .collection('folders')
+        .doc(folder.id);
+      
+      const data = {
+        id: folder.id,
+        name: folder.data.name || 'Unnamed Folder',
+        color: folder.data.color || null,
+        createdAt: this.validateTimestamp(folder.data.createdAt || Date.now(), `${folder.id}.createdAt`),
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        lastDevice: this.deviceId,
+      };
+
+      this.logger.log('info', `Upload folder [${folder.id}]: ${data.name}`);
+      
+      await docRef.set(data);
+    }
+
+    async downloadAllFolders() {
+      const workspaceId = this.config.get('workspaceId');
+      
+      const snapshot = await this.db
+        .collection('workspaces')
+        .doc(workspaceId)
+        .collection('folders')
+        .get();
+
+      return snapshot.docs.map(doc => {
+        const data = doc.data();
+        
+        const createdAtMillis = data.createdAt?.toMillis ? data.createdAt.toMillis() : Date.now();
+        
+        return {
+          id: doc.id,
+          name: data.name || 'Unnamed Folder',
+          color: data.color || null,
+          createdAt: this.isValidMillis(createdAtMillis) ? createdAtMillis : Date.now(),
+          lastDevice: data.lastDevice
+        };
+      });
+    }
+
+    async mergeRemoteFolder(remoteFolder) {
+      const folderKey = `FOLDER_${remoteFolder.id}`;
+      const idb = await this.getIndexedDB();
+
+      return new Promise((resolve, reject) => {
+        const tx = idb.transaction(['keyval'], 'readwrite');
+        const store = tx.objectStore('keyval');
+        
+        const getReq = store.get(folderKey);
+        
+        getReq.onsuccess = () => {
+          const localFolder = getReq.result;
+
+          if (!localFolder) {
+            const newFolder = {
+              id: remoteFolder.id,
+              name: remoteFolder.name,
+              color: remoteFolder.color,
+              createdAt: new Date(remoteFolder.createdAt).toISOString(),
+            };
+            
+            store.put(newFolder, folderKey).onsuccess = () => {
+              this.logger.log('info', `Created folder [${remoteFolder.id}]: ${remoteFolder.name}`);
+              resolve(true);
+            };
+            return;
+          }
+
+          this.logger.log('info', `Skip folder [${remoteFolder.id}]: already exists`);
+          resolve(false);
+        };
+
+        getReq.onerror = reject;
+      });
+    }
+
+    async deleteRemoteFolder(folderId) {
+      const workspaceId = this.config.get('workspaceId');
+      const batch = this.db.batch();
+      
+      const folderRef = this.db
+        .collection('workspaces')
+        .doc(workspaceId)
+        .collection('folders')
+        .doc(folderId);
+      
+      batch.delete(folderRef);
+      
+      const deletionRef = this.db
+        .collection('workspaces')
+        .doc(workspaceId)
+        .collection('folder_deletions')
+        .doc(folderId);
+      
+      batch.set(deletionRef, {
+        deletedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        deletedBy: this.deviceId
+      });
+      
+      await batch.commit();
+      
+      this.logger.log('info', `Deleted folder from Firebase + tombstone: ${folderId}`);
+    }
+
+    async deleteLocalFolder(folderId) {
+      const folderKey = `FOLDER_${folderId}`;
+      const idb = await this.getIndexedDB();
+
+      return new Promise((resolve, reject) => {
+        const tx = idb.transaction(['keyval'], 'readwrite');
+        const store = tx.objectStore('keyval');
+        
+        const deleteReq = store.delete(folderKey);
+        
+        deleteReq.onsuccess = () => {
+          this.logger.log('info', `Deleted folder locally: ${folderId}`);
+          resolve();
+        };
+        
+        deleteReq.onerror = reject;
+      });
+    }
+
+    async downloadDeletedFolderIds() {
+      const workspaceId = this.config.get('workspaceId');
+      
+      try {
+        const snapshot = await this.db
+          .collection('workspaces')
+          .doc(workspaceId)
+          .collection('folder_deletions')
+          .get();
+        
+        return snapshot.docs.map(doc => doc.id);
+      } catch (error) {
+        this.logger.log('error', 'Failed to download folder tombstones', error.message);
+        return [];
+      }
     }
 
     async uploadChat(chat) {
