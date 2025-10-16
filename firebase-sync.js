@@ -110,6 +110,45 @@ if (window.typingMindFirebaseSync) {
       return id;
     }
 
+    getDeletedChats() {
+      try {
+        const stored = localStorage.getItem('tcs_fb_deletedChats');
+        return stored ? JSON.parse(stored) : [];
+      } catch {
+        return [];
+      }
+    }
+
+    markChatAsDeleted(chatId) {
+      const deleted = this.getDeletedChats();
+      if (!deleted.includes(chatId)) {
+        deleted.push(chatId);
+        localStorage.setItem('tcs_fb_deletedChats', JSON.stringify(deleted));
+        this.logger.log('info', `Marked as deleted: ${chatId}`);
+      }
+    }
+
+    isChatDeleted(chatId) {
+      return this.getDeletedChats().includes(chatId);
+    }
+
+    async downloadDeletedChatIds() {
+      const workspaceId = this.config.get('workspaceId');
+      
+      try {
+        const snapshot = await this.db
+          .collection('workspaces')
+          .doc(workspaceId)
+          .collection('deletions')
+          .get();
+        
+        return snapshot.docs.map(doc => doc.id);
+      } catch (error) {
+        this.logger.log('error', 'Failed to download tombstones', error.message);
+        return [];
+      }
+    }
+
     async loadSDK() {
       if (this.sdkLoaded) return;
       const existing = document.querySelector('script#firebase-compat');
@@ -244,13 +283,77 @@ if (window.typingMindFirebaseSync) {
       }
 
       this.isSyncing = true;
-      this.logger.log('start', 'Smart sync...');
+      this.logger.log('start', 'Smart sync with deletion tracking...');
 
       try {
+        const remoteDeletedIds = await this.downloadDeletedChatIds();
+        this.logger.log('info', `Remote deletions: ${remoteDeletedIds.length}`);
+
+        for (const deletedId of remoteDeletedIds) {
+          if (!this.isChatDeleted(deletedId)) {
+            this.markChatAsDeleted(deletedId);
+          }
+        }
+
         const localChats = await this.getAllLocalChats();
+        const localChatIds = localChats.map(c => c.id);
         this.logger.log('info', `Local: ${localChats.length} chats`);
 
+        const lastKnownIds = this.getLastKnownChatIds();
+        const deletedLocally = lastKnownIds.filter(id => 
+          !localChatIds.includes(id) && !this.isChatDeleted(id)
+        );
+
+        if (deletedLocally.length > 0) {
+          this.logger.log('warning', `Detected ${deletedLocally.length} locally deleted chats`);
+          
+          for (const chatId of deletedLocally) {
+            try {
+              await this.deleteRemoteChat(chatId);
+              this.markChatAsDeleted(chatId);
+              this.logger.log('success', `Deleted from Firebase: ${chatId}`);
+            } catch (error) {
+              this.logger.log('error', `Failed to delete ${chatId}`, error.message);
+            }
+          }
+        }
+
+        const toDeleteLocally = localChatIds.filter(id => 
+          remoteDeletedIds.includes(id)
+        );
+
+        if (toDeleteLocally.length > 0) {
+          this.logger.log('warning', `Remote deleted (tombstones): ${toDeleteLocally.length} chats`);
+          
+          for (const chatId of toDeleteLocally) {
+            try {
+              await this.deleteLocalChat(chatId);
+              this.logger.log('success', `Deleted locally: ${chatId}`);
+            } catch (error) {
+              this.logger.log('error', `Failed to delete locally ${chatId}`, error.message);
+            }
+          }
+
+          const updatedLocalChats = await this.getAllLocalChats();
+          localChats.length = 0;
+          localChats.push(...updatedLocalChats);
+        }
+
+        const currentLocalIds = localChats.map(c => c.id);
+        this.saveLastKnownChatIds(currentLocalIds);
+
         const chatsToUpload = localChats.filter(chat => {
+          if (remoteDeletedIds.includes(chat.id)) {
+            this.logger.log('warning', `Skip chat with tombstone: ${chat.id}`);
+            this.markChatAsDeleted(chat.id);
+            return false;
+          }
+          
+          if (this.isChatDeleted(chat.id)) {
+            this.logger.log('warning', `Skip deleted chat: ${chat.id}`);
+            return false;
+          }
+          
           const lastSync = this.lastSyncTimestamps[chat.id] || 0;
           const chatUpdated = chat.data.updatedAt || 0;
           const chatUpdatedMs = typeof chatUpdated === 'string' ? Date.parse(chatUpdated) : chatUpdated;
@@ -282,6 +385,11 @@ if (window.typingMindFirebaseSync) {
         const mergedChatIds = [];
         
         for (const remoteChat of remoteChats) {
+          if (this.isChatDeleted(remoteChat.id)) {
+            this.logger.log('warning', `Skip merging deleted chat: ${remoteChat.id}`);
+            continue;
+          }
+
           try {
             const wasMerged = await this.mergeRemoteChat(remoteChat);
             if (wasMerged) {
@@ -319,6 +427,70 @@ if (window.typingMindFirebaseSync) {
       } catch (e) {
         this.logger.log('warning', 'Failed to save sync timestamps');
       }
+    }
+
+    getLastKnownChatIds() {
+      try {
+        const stored = localStorage.getItem('tcs_fb_lastKnownChatIds');
+        return stored ? JSON.parse(stored) : [];
+      } catch {
+        return [];
+      }
+    }
+
+    saveLastKnownChatIds(chatIds) {
+      try {
+        localStorage.setItem('tcs_fb_lastKnownChatIds', JSON.stringify(chatIds));
+      } catch (e) {
+        this.logger.log('warning', 'Failed to save known chat IDs');
+      }
+    }
+
+    async deleteRemoteChat(chatId) {
+      const workspaceId = this.config.get('workspaceId');
+      const batch = this.db.batch();
+      
+      const chatRef = this.db
+        .collection('workspaces')
+        .doc(workspaceId)
+        .collection('chats')
+        .doc(chatId);
+      
+      batch.delete(chatRef);
+      
+      const deletionRef = this.db
+        .collection('workspaces')
+        .doc(workspaceId)
+        .collection('deletions')
+        .doc(chatId);
+      
+      batch.set(deletionRef, {
+        deletedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        deletedBy: this.deviceId
+      });
+      
+      await batch.commit();
+      
+      this.logger.log('info', `Deleted from Firebase + tombstone: ${chatId}`);
+    }
+
+    async deleteLocalChat(chatId) {
+      const chatKey = `CHAT_${chatId}`;
+      const idb = await this.getIndexedDB();
+
+      return new Promise((resolve, reject) => {
+        const tx = idb.transaction(['keyval'], 'readwrite');
+        const store = tx.objectStore('keyval');
+        
+        const deleteReq = store.delete(chatKey);
+        
+        deleteReq.onsuccess = () => {
+          this.logger.log('info', `Deleted locally: ${chatId}`);
+          resolve();
+        };
+        
+        deleteReq.onerror = reject;
+      });
     }
 
     loadLastSyncTimestamps() {
