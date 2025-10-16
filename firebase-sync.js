@@ -292,7 +292,7 @@ if (window.typingMindFirebaseSync) {
         const remoteDeletedFolderIds = await this.downloadDeletedFolderIds();
         this.logger.log('info', `Remote folder deletions: ${remoteDeletedFolderIds.length}`);
 
-        const localFolders = await this.getAllLocalFolders();
+        const localFolders = this.getAllLocalFolders();
         const localFolderIds = localFolders.map(f => f.id);
         this.logger.log('info', `Local folders: ${localFolders.length}`);
 
@@ -312,7 +312,7 @@ if (window.typingMindFirebaseSync) {
         let foldersCreated = 0;
         for (const remoteFolder of remoteFolders) {
           try {
-            const wasCreated = await this.mergeRemoteFolder(remoteFolder);
+            const wasCreated = this.mergeRemoteFolder(remoteFolder);
             if (wasCreated) foldersCreated++;
           } catch (error) {
             this.logger.log('error', `Folder merge failed: ${remoteFolder.id}`, error.message);
@@ -331,7 +331,7 @@ if (window.typingMindFirebaseSync) {
           this.logger.log('warning', `Deleting ${foldersToDeleteLocally.length} folders locally`);
           for (const folderId of foldersToDeleteLocally) {
             try {
-              await this.deleteLocalFolder(folderId);
+              this.deleteLocalFolder(folderId);
             } catch (error) {
               this.logger.log('error', `Failed to delete folder ${folderId}`, error.message);
             }
@@ -593,33 +593,22 @@ if (window.typingMindFirebaseSync) {
       });
     }
 
-    async getAllLocalFolders() {
-      const idb = await this.getIndexedDB();
-      return new Promise((resolve, reject) => {
-        const tx = idb.transaction(['keyval'], 'readonly');
-        const store = tx.objectStore('keyval');
-        const folders = [];
-
-        store.openCursor().onsuccess = (e) => {
-          const cursor = e.target.result;
-          if (!cursor) {
-            resolve(folders);
-            return;
-          }
-
-          const key = cursor.key;
-          if (typeof key === 'string' && key.startsWith('FOLDER_')) {
-            const folder = cursor.value;
-            folders.push({
-              id: key.replace('FOLDER_', ''),
-              data: folder
-            });
-          }
-          cursor.continue();
-        };
-
-        store.openCursor().onerror = reject;
-      });
+    getAllLocalFolders() {
+      try {
+        const folderListStr = localStorage.getItem('TM_useFolderList');
+        if (!folderListStr) return [];
+        
+        const folderList = JSON.parse(folderListStr);
+        if (!Array.isArray(folderList)) return [];
+        
+        return folderList.map(folder => ({
+          id: folder.id,
+          data: folder
+        }));
+      } catch (error) {
+        this.logger.log('error', 'Failed to get local folders', error.message);
+        return [];
+      }
     }
 
     async uploadFolder(folder) {
@@ -633,14 +622,15 @@ if (window.typingMindFirebaseSync) {
       
       const data = {
         id: folder.id,
-        name: folder.data.name || 'Unnamed Folder',
+        title: folder.data.title || folder.data.name || 'Unnamed Folder',
         color: folder.data.color || null,
-        createdAt: this.validateTimestamp(folder.data.createdAt || Date.now(), `${folder.id}.createdAt`),
+        open: folder.data.open || false,
+        new: folder.data.new || false,
         updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
         lastDevice: this.deviceId,
       };
 
-      this.logger.log('info', `Upload folder [${folder.id}]: ${data.name}`);
+      this.logger.log('info', `Upload folder [${folder.id}]: ${data.title}`);
       
       await docRef.set(data);
     }
@@ -657,52 +647,50 @@ if (window.typingMindFirebaseSync) {
       return snapshot.docs.map(doc => {
         const data = doc.data();
         
-        const createdAtMillis = data.createdAt?.toMillis ? data.createdAt.toMillis() : Date.now();
-        
         return {
           id: doc.id,
-          name: data.name || 'Unnamed Folder',
+          title: data.title || 'Unnamed Folder',
           color: data.color || null,
-          createdAt: this.isValidMillis(createdAtMillis) ? createdAtMillis : Date.now(),
+          open: data.open || false,
+          new: data.new || false,
           lastDevice: data.lastDevice
         };
       });
     }
 
-    async mergeRemoteFolder(remoteFolder) {
-      const folderKey = `FOLDER_${remoteFolder.id}`;
-      const idb = await this.getIndexedDB();
-
-      return new Promise((resolve, reject) => {
-        const tx = idb.transaction(['keyval'], 'readwrite');
-        const store = tx.objectStore('keyval');
+    mergeRemoteFolder(remoteFolder) {
+      try {
+        const folderListStr = localStorage.getItem('TM_useFolderList');
+        let folderList = folderListStr ? JSON.parse(folderListStr) : [];
         
-        const getReq = store.get(folderKey);
+        if (!Array.isArray(folderList)) {
+          folderList = [];
+        }
         
-        getReq.onsuccess = () => {
-          const localFolder = getReq.result;
-
-          if (!localFolder) {
-            const newFolder = {
-              id: remoteFolder.id,
-              name: remoteFolder.name,
-              color: remoteFolder.color,
-              createdAt: new Date(remoteFolder.createdAt).toISOString(),
-            };
-            
-            store.put(newFolder, folderKey).onsuccess = () => {
-              this.logger.log('info', `Created folder [${remoteFolder.id}]: ${remoteFolder.name}`);
-              resolve(true);
-            };
-            return;
-          }
-
+        const existingIndex = folderList.findIndex(f => f.id === remoteFolder.id);
+        
+        if (existingIndex === -1) {
+          const newFolder = {
+            id: remoteFolder.id,
+            title: remoteFolder.title,
+            color: remoteFolder.color || null,
+            open: remoteFolder.open || false,
+            new: false
+          };
+          
+          folderList.push(newFolder);
+          localStorage.setItem('TM_useFolderList', JSON.stringify(folderList));
+          
+          this.logger.log('info', `Created folder [${remoteFolder.id}]: ${remoteFolder.title}`);
+          return true;
+        } else {
           this.logger.log('info', `Skip folder [${remoteFolder.id}]: already exists`);
-          resolve(false);
-        };
-
-        getReq.onerror = reject;
-      });
+          return false;
+        }
+      } catch (error) {
+        this.logger.log('error', 'Failed to merge folder', error.message);
+        return false;
+      }
     }
 
     async deleteRemoteFolder(folderId) {
@@ -733,23 +721,20 @@ if (window.typingMindFirebaseSync) {
       this.logger.log('info', `Deleted folder from Firebase + tombstone: ${folderId}`);
     }
 
-    async deleteLocalFolder(folderId) {
-      const folderKey = `FOLDER_${folderId}`;
-      const idb = await this.getIndexedDB();
-
-      return new Promise((resolve, reject) => {
-        const tx = idb.transaction(['keyval'], 'readwrite');
-        const store = tx.objectStore('keyval');
+    deleteLocalFolder(folderId) {
+      try {
+        const folderListStr = localStorage.getItem('TM_useFolderList');
+        let folderList = folderListStr ? JSON.parse(folderListStr) : [];
         
-        const deleteReq = store.delete(folderKey);
+        if (!Array.isArray(folderList)) return;
         
-        deleteReq.onsuccess = () => {
-          this.logger.log('info', `Deleted folder locally: ${folderId}`);
-          resolve();
-        };
+        const newFolderList = folderList.filter(f => f.id !== folderId);
+        localStorage.setItem('TM_useFolderList', JSON.stringify(newFolderList));
         
-        deleteReq.onerror = reject;
-      });
+        this.logger.log('info', `Deleted folder locally: ${folderId}`);
+      } catch (error) {
+        this.logger.log('error', 'Failed to delete folder locally', error.message);
+      }
     }
 
     async downloadDeletedFolderIds() {
