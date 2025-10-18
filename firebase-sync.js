@@ -968,12 +968,6 @@ if (window.typingMindFirebaseSync) {
                       createdAt: Date.now(),
                       refusal: null,
                       citations: null,
-                      reasoning_content: null,
-                      reasoning_summary: null,
-                      reasoning_details: null,
-                      _reasoning_start: null,
-                      _reasoning_finish: null,
-                      reasoning: null,
                     });
                   }
                   
@@ -995,6 +989,7 @@ if (window.typingMindFirebaseSync) {
                     _reasoning_start: lastMessage._reasoning_start || null,
                     _reasoning_finish: lastMessage._reasoning_finish || null,
                     reasoning: lastMessage.reasoning || null,
+                    finish: lastMessage.finish || null,
                   });
                 }) : []
               };
@@ -1038,27 +1033,10 @@ if (window.typingMindFirebaseSync) {
             
             if (m.threads && Array.isArray(m.threads) && m.threads.length > 0) {
               clean.threads = m.threads.map((thread, threadIdx) => {
-                const threadMessages = Array.isArray(thread.messages) ? thread.messages : [];
-                
-                const hasUserMessage = threadMessages.some(tm => tm.role === 'user');
-                let finalMessages = [...threadMessages];
-                
-                if (!hasUserMessage && thread.userMessageContent) {
-                  const userMessage = {
-                    role: 'user',
-                    content: Array.isArray(thread.userMessageContent) 
-                      ? thread.userMessageContent 
-                      : [{ type: 'text', text: String(thread.userMessageContent) }],
-                    createdAt: thread.createdAt ? this.validateTimestamp(thread.createdAt).toMillis() : Date.now(),
-                    uuid: null
-                  };
-                  finalMessages.unshift(userMessage);
-                }
-                
                 const cleanThread = {
                   createdAt: thread.createdAt ? this.validateTimestamp(thread.createdAt, `${chatId}.msg[${idx}].thread[${threadIdx}].createdAt`).toMillis() : Date.now(),
                   userMessageContent: thread.userMessageContent || null,
-                  messages: finalMessages.map((tm, tmIdx) => {
+                  messages: Array.isArray(thread.messages) ? thread.messages.map((tm, tmIdx) => {
                     let threadMsgContent = '';
                     if (typeof tm.content === 'string') {
                       threadMsgContent = tm.content;
@@ -1071,17 +1049,8 @@ if (window.typingMindFirebaseSync) {
                       threadMsgContent = JSON.stringify(tm.content || '');
                     }
                     
-                    let tmRole = tm.role;
-                    if (!tmRole || tmRole === 'undefined') {
-                      if (tm.model || tm.usage) {
-                        tmRole = 'assistant';
-                      } else {
-                        tmRole = 'user';
-                      }
-                    }
-                    
                     return cleanUndefined({
-                      role: tmRole,
+                      role: tm.role || 'user',
                       content: String(threadMsgContent).slice(0, 100000),
                       uuid: tm.uuid || null,
                       model: tm.model || null,
@@ -1090,7 +1059,7 @@ if (window.typingMindFirebaseSync) {
                       citations: tm.citations || null,
                       createdAt: tm.createdAt ? this.validateTimestamp(tm.createdAt, `${chatId}.msg[${idx}].thread[${threadIdx}].msg[${tmIdx}].createdAt`).toMillis() : Date.now(),
                     });
-                  })
+                  }) : []
                 };
                 return cleanUndefined(cleanThread);
               });
@@ -1102,7 +1071,6 @@ if (window.typingMindFirebaseSync) {
             if (m.reasoning_details) clean.reasoning_details = m.reasoning_details;
             if (m._reasoning_start) clean._reasoning_start = m._reasoning_start;
             if (m._reasoning_finish) clean._reasoning_finish = m._reasoning_finish;
-            if (m.reasoning) clean.reasoning = m.reasoning;
             
             if (typeof m.content === 'string') {
               clean._contentType = 'string';
@@ -1243,21 +1211,8 @@ if (window.typingMindFirebaseSync) {
           uuid: m.uuid || null,
           createdAt: new Date(m.createdAt).toISOString(),
           responses: Array.isArray(m.responses) ? m.responses.map(resp => {
-            const hasContent = resp.content && (
-              (typeof resp.content === 'string' && resp.content.length > 0) ||
-              (Array.isArray(resp.content) && resp.content.length > 0)
-            );
-            
-            if (!hasContent) {
-              return {
-                id: resp.id || null,
-                model: resp.model || null,
-                messages: []
-              };
-            }
-            
             const message = {
-              content: resp.content,
+              content: resp.content || '',
               role: resp.role || 'assistant',
               uuid: resp.uuid || null,
               model: resp.model || null,
@@ -1267,29 +1222,18 @@ if (window.typingMindFirebaseSync) {
               citations: resp.citations || null,
             };
             
-            if (resp.reasoning_content) {
-              message.reasoning_content = resp.reasoning_content;
-            }
-            if (resp.reasoning_summary) {
-              message.reasoning_summary = resp.reasoning_summary;
-            }
-            if (resp.reasoning_details) {
-              message.reasoning_details = resp.reasoning_details;
-            }
-            if (resp._reasoning_start) {
-              message._reasoning_start = resp._reasoning_start;
-            }
-            if (resp._reasoning_finish) {
-              message._reasoning_finish = resp._reasoning_finish;
-            }
-            if (resp.reasoning) {
-              message.reasoning = resp.reasoning;
-            }
+            if (resp.reasoning_content) message.reasoning_content = resp.reasoning_content;
+            if (resp.reasoning_summary) message.reasoning_summary = resp.reasoning_summary;
+            if (resp.reasoning_details) message.reasoning_details = resp.reasoning_details;
+            if (resp._reasoning_start) message._reasoning_start = resp._reasoning_start;
+            if (resp._reasoning_finish) message._reasoning_finish = resp._reasoning_finish;
+            if (resp.reasoning !== undefined) message.reasoning = resp.reasoning;
+            if (resp.finish) message.finish = resp.finish;
             
             return {
               id: resp.id || null,
               model: resp.model || null,
-              messages: [message]
+              messages: message.content ? [message] : [] 
             };
           }) : []
         };
@@ -1364,7 +1308,7 @@ if (window.typingMindFirebaseSync) {
               }
               
               return {
-                role: tmRole,
+                role: tmRole, 
                 content: tmContent,
                 uuid: tm.uuid || null,
                 model: tm.model || null,
@@ -1381,7 +1325,6 @@ if (window.typingMindFirebaseSync) {
       if (m.reasoning_details) reconstructed.reasoning_details = m.reasoning_details;
       if (m._reasoning_start) reconstructed._reasoning_start = m._reasoning_start;
       if (m._reasoning_finish) reconstructed._reasoning_finish = m._reasoning_finish;
-      if (m.reasoning) reconstructed.reasoning = m.reasoning;
 
       return reconstructed;
     }
