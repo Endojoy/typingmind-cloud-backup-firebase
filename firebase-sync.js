@@ -953,13 +953,33 @@ if (window.typingMindFirebaseSync) {
                 uuid: m.uuid || null,
                 createdAt: this.validateTimestamp(m.createdAt, `${chatId}.msg[${idx}].createdAt`).toMillis(),
                 responses: Array.isArray(m.responses) ? m.responses.map((resp, respIdx) => {
+                  let respContent = resp.content;
+                  let contentType = 'unknown';
+                  
+                  if (typeof resp.content === 'string') {
+                    contentType = 'string';
+                    respContent = resp.content;
+                  } else if (Array.isArray(resp.content)) {
+                    contentType = 'array';
+                    respContent = resp.content; 
+                  } else if (resp.content && typeof resp.content === 'object') {
+                    contentType = 'object';
+                    respContent = resp.content;
+                  } else {
+                    contentType = 'string';
+                    respContent = '';
+                  }
+                  
                   return cleanUndefined({
                     role: resp.role || 'assistant',
-                    content: typeof resp.content === 'string' ? resp.content : JSON.stringify(resp.content || ''),
+                    content: respContent, 
                     model: resp.model || null,
                     usage: resp.usage || null,
                     uuid: resp.uuid || null,
                     createdAt: resp.createdAt ? this.validateTimestamp(resp.createdAt, `${chatId}.msg[${idx}].resp[${respIdx}].createdAt`).toMillis() : Date.now(),
+                    refusal: resp.refusal || null,
+                    citations: resp.citations || null,
+                    _contentType: contentType
                   });
                 }) : []
               };
@@ -1181,13 +1201,33 @@ if (window.typingMindFirebaseSync) {
           uuid: m.uuid || null,
           createdAt: new Date(m.createdAt).toISOString(),
           responses: Array.isArray(m.responses) ? m.responses.map(resp => {
+            let respContent;
+            
+            if (resp._contentType === 'string') {
+              respContent = resp.content || '';
+            } else if (resp._contentType === 'array') {
+              respContent = Array.isArray(resp.content) ? resp.content : [];
+            } else if (resp._contentType === 'object') {
+              respContent = resp.content || {};
+            } else {
+              if (typeof resp.content === 'string') {
+                respContent = resp.content;
+              } else if (Array.isArray(resp.content)) {
+                respContent = resp.content;
+              } else {
+                respContent = '';
+              }
+            }
+            
             return {
               role: resp.role || 'assistant',
-              content: resp.content,
+              content: respContent,
               model: resp.model || null,
               usage: resp.usage || null,
               uuid: resp.uuid || null,
               createdAt: resp.createdAt ? new Date(resp.createdAt).toISOString() : new Date().toISOString(),
+              refusal: resp.refusal || null,
+              citations: resp.citations || null,
             };
           }) : []
         };
