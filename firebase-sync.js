@@ -1272,29 +1272,17 @@ if (window.typingMindFirebaseSync) {
               citations: resp.citations || null,
             };
             
-            if (resp.reasoning_content) {
-              message.reasoning_content = resp.reasoning_content;
-            }
-            if (resp.reasoning_summary) {
-              message.reasoning_summary = resp.reasoning_summary;
-            }
-            if (resp.reasoning_details) {
-              message.reasoning_details = resp.reasoning_details;
-            }
-            if (resp._reasoning_start) {
-              message._reasoning_start = resp._reasoning_start;
-            }
-            if (resp._reasoning_finish) {
-              message._reasoning_finish = resp._reasoning_finish;
-            }
-            if (resp.reasoning) {
-              message.reasoning = resp.reasoning;
-            }
+            if (resp.reasoning_content) message.reasoning_content = resp.reasoning_content;
+            if (resp.reasoning_summary) message.reasoning_summary = resp.reasoning_summary;
+            if (resp.reasoning_details) message.reasoning_details = resp.reasoning_details;
+            if (resp._reasoning_start) message._reasoning_start = resp._reasoning_start;
+            if (resp._reasoning_finish) message._reasoning_finish = resp._reasoning_finish;
+            if (resp.reasoning) message.reasoning = resp.reasoning;
             
             return {
-              id: resp.id || null,
+              id: resp.id || `reconstructed-${Date.now()}-${Math.random()}`,
               model: resp.model || null,
-              messages: messageContent || (messageContent === '' && (resp._reasoning_start || resp._reasoning_finish)) ? [message] : []
+              messages: (messageContent || resp._reasoning_start) ? [message] : []
             };
           }) : []
         };
@@ -1389,7 +1377,6 @@ if (window.typingMindFirebaseSync) {
 
       return reconstructed;
     }
-
 
     async getIndexedDB() {
       return new Promise((resolve, reject) => {
