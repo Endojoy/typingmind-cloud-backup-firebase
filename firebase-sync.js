@@ -903,6 +903,22 @@ if (window.typingMindFirebaseSync) {
         return [];
       }
       
+      const cleanUndefined = (obj) => {
+        if (obj === undefined) return null;
+        if (obj === null) return null;
+        if (typeof obj !== 'object') return obj;
+        if (Array.isArray(obj)) return obj.map(cleanUndefined);
+        
+        const cleaned = {};
+        Object.keys(obj).forEach(key => {
+          const value = obj[key];
+          if (value !== undefined) {
+            cleaned[key] = cleanUndefined(value);
+          }
+        });
+        return cleaned;
+      };
+      
       return messages
         .filter((m, idx) => {
           if (!m || typeof m !== 'object') {
@@ -937,17 +953,17 @@ if (window.typingMindFirebaseSync) {
                 uuid: m.uuid || null,
                 createdAt: this.validateTimestamp(m.createdAt, `${chatId}.msg[${idx}].createdAt`).toMillis(),
                 responses: Array.isArray(m.responses) ? m.responses.map((resp, respIdx) => {
-                  return {
+                  return cleanUndefined({
                     role: resp.role || 'assistant',
-                    content: typeof resp.content === 'string' ? resp.content : JSON.stringify(resp.content),
+                    content: typeof resp.content === 'string' ? resp.content : JSON.stringify(resp.content || ''),
                     model: resp.model || null,
                     usage: resp.usage || null,
                     uuid: resp.uuid || null,
                     createdAt: resp.createdAt ? this.validateTimestamp(resp.createdAt, `${chatId}.msg[${idx}].resp[${respIdx}].createdAt`).toMillis() : Date.now(),
-                  };
+                  });
                 }) : []
               };
-              return clean;
+              return cleanUndefined(clean);
             }
 
             let textContent = '';
@@ -987,7 +1003,7 @@ if (window.typingMindFirebaseSync) {
             
             if (m.threads && Array.isArray(m.threads) && m.threads.length > 0) {
               clean.threads = m.threads.map((thread, threadIdx) => {
-                return {
+                const cleanThread = {
                   createdAt: thread.createdAt ? this.validateTimestamp(thread.createdAt, `${chatId}.msg[${idx}].thread[${threadIdx}].createdAt`).toMillis() : Date.now(),
                   userMessageContent: thread.userMessageContent || null,
                   messages: Array.isArray(thread.messages) ? thread.messages.map((tm, tmIdx) => {
@@ -1000,19 +1016,22 @@ if (window.typingMindFirebaseSync) {
                         .map(part => part.text)
                         .join('\n');
                     } else {
-                      threadMsgContent = JSON.stringify(tm.content);
+                      threadMsgContent = JSON.stringify(tm.content || '');
                     }
                     
-                    return {
+                    return cleanUndefined({
                       role: tm.role || 'user',
                       content: String(threadMsgContent).slice(0, 100000),
                       uuid: tm.uuid || null,
                       model: tm.model || null,
                       usage: tm.usage || null,
+                      refusal: tm.refusal || null,
+                      citations: tm.citations || null,
                       createdAt: tm.createdAt ? this.validateTimestamp(tm.createdAt, `${chatId}.msg[${idx}].thread[${threadIdx}].msg[${tmIdx}].createdAt`).toMillis() : Date.now(),
-                    };
+                    });
                   }) : []
                 };
+                return cleanUndefined(cleanThread);
               });
               this.logger.log('info', `${chatId}.msg[${idx}]: ${clean.threads.length} edit thread(s)`);
             }
@@ -1030,7 +1049,7 @@ if (window.typingMindFirebaseSync) {
               clean._originalContent = m.content;
             }
             
-            return clean;
+            return cleanUndefined(clean);
           } catch (error) {
             this.logger.log('error', `${chatId}: Failed msg ${idx}`, error.message);
             return {
