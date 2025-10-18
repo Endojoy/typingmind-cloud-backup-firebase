@@ -953,33 +953,37 @@ if (window.typingMindFirebaseSync) {
                 uuid: m.uuid || null,
                 createdAt: this.validateTimestamp(m.createdAt, `${chatId}.msg[${idx}].createdAt`).toMillis(),
                 responses: Array.isArray(m.responses) ? m.responses.map((resp, respIdx) => {
-                  let respContent = resp.content;
-                  let contentType = 'unknown';
+                  const lastMessage = Array.isArray(resp.messages) && resp.messages.length > 0 
+                    ? resp.messages[resp.messages.length - 1] 
+                    : null;
                   
-                  if (typeof resp.content === 'string') {
-                    contentType = 'string';
-                    respContent = resp.content;
-                  } else if (Array.isArray(resp.content)) {
-                    contentType = 'array';
-                    respContent = resp.content; 
-                  } else if (resp.content && typeof resp.content === 'object') {
-                    contentType = 'object';
-                    respContent = resp.content;
-                  } else {
-                    contentType = 'string';
-                    respContent = '';
+                  if (!lastMessage) {
+                    return cleanUndefined({
+                      id: resp.id || null,
+                      model: resp.model || null,
+                      role: 'assistant',
+                      content: '',
+                      uuid: null,
+                      usage: null,
+                      createdAt: Date.now(),
+                      refusal: null,
+                      citations: null,
+                    });
                   }
                   
                   return cleanUndefined({
-                    role: resp.role || 'assistant',
-                    content: respContent, 
-                    model: resp.model || null,
-                    usage: resp.usage || null,
-                    uuid: resp.uuid || null,
-                    createdAt: resp.createdAt ? this.validateTimestamp(resp.createdAt, `${chatId}.msg[${idx}].resp[${respIdx}].createdAt`).toMillis() : Date.now(),
-                    refusal: resp.refusal || null,
-                    citations: resp.citations || null,
-                    _contentType: contentType
+                    id: resp.id || null,
+                    model: resp.model || lastMessage.model || null,
+                    role: lastMessage.role || 'assistant',
+                    content: lastMessage.content || '',
+                    uuid: lastMessage.uuid || null,
+                    usage: lastMessage.usage || null,
+                    createdAt: lastMessage.createdAt 
+                      ? this.validateTimestamp(lastMessage.createdAt, `${chatId}.msg[${idx}].resp[${respIdx}].createdAt`).toMillis() 
+                      : Date.now(),
+                    refusal: lastMessage.refusal || null,
+                    citations: lastMessage.citations || null,
+                    reasoning_content: lastMessage.reasoning_content || null,
                   });
                 }) : []
               };
@@ -1201,33 +1205,25 @@ if (window.typingMindFirebaseSync) {
           uuid: m.uuid || null,
           createdAt: new Date(m.createdAt).toISOString(),
           responses: Array.isArray(m.responses) ? m.responses.map(resp => {
-            let respContent;
-            
-            if (resp._contentType === 'string') {
-              respContent = resp.content || '';
-            } else if (resp._contentType === 'array') {
-              respContent = Array.isArray(resp.content) ? resp.content : [];
-            } else if (resp._contentType === 'object') {
-              respContent = resp.content || {};
-            } else {
-              if (typeof resp.content === 'string') {
-                respContent = resp.content;
-              } else if (Array.isArray(resp.content)) {
-                respContent = resp.content;
-              } else {
-                respContent = '';
-              }
-            }
-            
-            return {
+            const message = {
+              content: resp.content || '',
               role: resp.role || 'assistant',
-              content: respContent,
+              uuid: resp.uuid || null,
               model: resp.model || null,
               usage: resp.usage || null,
-              uuid: resp.uuid || null,
               createdAt: resp.createdAt ? new Date(resp.createdAt).toISOString() : new Date().toISOString(),
               refusal: resp.refusal || null,
               citations: resp.citations || null,
+            };
+            
+            if (resp.reasoning_content) {
+              message.reasoning_content = resp.reasoning_content;
+            }
+            
+            return {
+              id: resp.id || null,
+              model: resp.model || null,
+              messages: message.content ? [message] : [] 
             };
           }) : []
         };
