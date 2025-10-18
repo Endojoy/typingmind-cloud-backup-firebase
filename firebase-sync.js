@@ -973,9 +973,18 @@ if (window.typingMindFirebaseSync) {
                       citations: null,
                     };
                   } else {
+                    let messageContent;
+                    if (typeof lastMessage.content === 'string') {
+                      messageContent = lastMessage.content;
+                    } else if (Array.isArray(lastMessage.content)) {
+                      messageContent = lastMessage.content; 
+                    } else {
+                      messageContent = '';
+                    }
+                    
                     responseData.message = {
                       role: lastMessage.role || 'assistant',
-                      content: lastMessage.content || '',
+                      content: messageContent, 
                       uuid: lastMessage.uuid || null,
                       usage: lastMessage.usage || null,
                       createdAt: lastMessage.createdAt 
@@ -990,6 +999,7 @@ if (window.typingMindFirebaseSync) {
                       _reasoning_finish: lastMessage._reasoning_finish || null,
                       reasoning: lastMessage.reasoning || null,
                       finish: lastMessage.finish || null,
+                      _contentType: typeof lastMessage.content === 'string' ? 'string' : 'array',
                     };
                   }
                   
@@ -1214,13 +1224,42 @@ if (window.typingMindFirebaseSync) {
           uuid: m.uuid || null,
           createdAt: new Date(m.createdAt).toISOString(),
           responses: Array.isArray(m.responses) ? m.responses.map(resp => {
-            const msg = resp.message || {};
+            let msg;
+            let respId;
+            let respModel;
+            
+            if (resp.message) {
+              msg = resp.message;
+              respId = resp.id;
+              respModel = resp.model;
+            } else if (resp.id && resp.messages) {
+              return resp;
+            } else {
+              msg = resp;
+              respId = null;
+              respModel = resp.model;
+            }
+            
+            let messageContent;
+            if (msg._contentType === 'string') {
+              messageContent = msg.content || '';
+            } else if (msg._contentType === 'array') {
+              messageContent = msg.content || [];
+            } else {
+              if (typeof msg.content === 'string') {
+                messageContent = msg.content;
+              } else if (Array.isArray(msg.content)) {
+                messageContent = msg.content;
+              } else {
+                messageContent = '';
+              }
+            }
             
             const message = {
-              content: msg.content || '',
+              content: messageContent,
               role: msg.role || 'assistant',
               uuid: msg.uuid || null,
-              model: resp.model || null,
+              model: respModel || msg.model || null,
               usage: msg.usage || null,
               createdAt: msg.createdAt ? new Date(msg.createdAt).toISOString() : new Date().toISOString(),
               refusal: msg.refusal || null,
@@ -1236,9 +1275,9 @@ if (window.typingMindFirebaseSync) {
             if (msg.finish) message.finish = msg.finish;
             
             return {
-              id: resp.id || null,
-              model: resp.model || null,
-              messages: message.content || msg.reasoning_content ? [message] : []
+              id: respId || null,
+              model: respModel || null,
+              messages: messageContent || msg.reasoning_content ? [message] : []
             };
           }) : []
         };
@@ -1272,7 +1311,7 @@ if (window.typingMindFirebaseSync) {
       if (m.model) reconstructed.model = m.model;
       if (m.usage) reconstructed.usage = m.usage;
       if (m.updatedAt) reconstructed.updatedAt = new Date(m.updatedAt).toISOString();
-
+      
       if (m.threads && Array.isArray(m.threads) && m.threads.length > 0) {
         reconstructed.threads = m.threads.map(thread => {
           const threadMessages = Array.isArray(thread.messages) ? thread.messages : [];
