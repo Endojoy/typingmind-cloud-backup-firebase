@@ -957,10 +957,13 @@ if (window.typingMindFirebaseSync) {
                     ? resp.messages[resp.messages.length - 1] 
                     : null;
                   
+                  const responseData = {
+                    id: resp.id || null,  
+                    model: resp.model || null,
+                  };
+                  
                   if (!lastMessage) {
-                    return cleanUndefined({
-                      id: resp.id || null,
-                      model: resp.model || null,
+                    responseData.message = {
                       role: 'assistant',
                       content: '',
                       uuid: null,
@@ -968,29 +971,29 @@ if (window.typingMindFirebaseSync) {
                       createdAt: Date.now(),
                       refusal: null,
                       citations: null,
-                    });
+                    };
+                  } else {
+                    responseData.message = {
+                      role: lastMessage.role || 'assistant',
+                      content: lastMessage.content || '',
+                      uuid: lastMessage.uuid || null,
+                      usage: lastMessage.usage || null,
+                      createdAt: lastMessage.createdAt 
+                        ? this.validateTimestamp(lastMessage.createdAt, `${chatId}.msg[${idx}].resp[${respIdx}].createdAt`).toMillis() 
+                        : Date.now(),
+                      refusal: lastMessage.refusal || null,
+                      citations: lastMessage.citations || null,
+                      reasoning_content: lastMessage.reasoning_content || null,
+                      reasoning_summary: lastMessage.reasoning_summary || null,
+                      reasoning_details: lastMessage.reasoning_details || null,
+                      _reasoning_start: lastMessage._reasoning_start || null,
+                      _reasoning_finish: lastMessage._reasoning_finish || null,
+                      reasoning: lastMessage.reasoning || null,
+                      finish: lastMessage.finish || null,
+                    };
                   }
                   
-                  return cleanUndefined({
-                    id: resp.id || null,
-                    model: resp.model || lastMessage.model || null,
-                    role: lastMessage.role || 'assistant',
-                    content: lastMessage.content || '',
-                    uuid: lastMessage.uuid || null,
-                    usage: lastMessage.usage || null,
-                    createdAt: lastMessage.createdAt 
-                      ? this.validateTimestamp(lastMessage.createdAt, `${chatId}.msg[${idx}].resp[${respIdx}].createdAt`).toMillis() 
-                      : Date.now(),
-                    refusal: lastMessage.refusal || null,
-                    citations: lastMessage.citations || null,
-                    reasoning_content: lastMessage.reasoning_content || null,
-                    reasoning_summary: lastMessage.reasoning_summary || null,
-                    reasoning_details: lastMessage.reasoning_details || null,
-                    _reasoning_start: lastMessage._reasoning_start || null,
-                    _reasoning_finish: lastMessage._reasoning_finish || null,
-                    reasoning: lastMessage.reasoning || null,
-                    finish: lastMessage.finish || null,
-                  });
+                  return cleanUndefined(responseData);
                 }) : []
               };
               return cleanUndefined(clean);
@@ -1211,29 +1214,31 @@ if (window.typingMindFirebaseSync) {
           uuid: m.uuid || null,
           createdAt: new Date(m.createdAt).toISOString(),
           responses: Array.isArray(m.responses) ? m.responses.map(resp => {
+            const msg = resp.message || {};
+            
             const message = {
-              content: resp.content || '',
-              role: resp.role || 'assistant',
-              uuid: resp.uuid || null,
+              content: msg.content || '',
+              role: msg.role || 'assistant',
+              uuid: msg.uuid || null,
               model: resp.model || null,
-              usage: resp.usage || null,
-              createdAt: resp.createdAt ? new Date(resp.createdAt).toISOString() : new Date().toISOString(),
-              refusal: resp.refusal || null,
-              citations: resp.citations || null,
+              usage: msg.usage || null,
+              createdAt: msg.createdAt ? new Date(msg.createdAt).toISOString() : new Date().toISOString(),
+              refusal: msg.refusal || null,
+              citations: msg.citations || null,
             };
             
-            if (resp.reasoning_content) message.reasoning_content = resp.reasoning_content;
-            if (resp.reasoning_summary) message.reasoning_summary = resp.reasoning_summary;
-            if (resp.reasoning_details) message.reasoning_details = resp.reasoning_details;
-            if (resp._reasoning_start) message._reasoning_start = resp._reasoning_start;
-            if (resp._reasoning_finish) message._reasoning_finish = resp._reasoning_finish;
-            if (resp.reasoning !== undefined) message.reasoning = resp.reasoning;
-            if (resp.finish) message.finish = resp.finish;
+            if (msg.reasoning_content) message.reasoning_content = msg.reasoning_content;
+            if (msg.reasoning_summary) message.reasoning_summary = msg.reasoning_summary;
+            if (msg.reasoning_details) message.reasoning_details = msg.reasoning_details;
+            if (msg._reasoning_start) message._reasoning_start = msg._reasoning_start;
+            if (msg._reasoning_finish) message._reasoning_finish = msg._reasoning_finish;
+            if (msg.reasoning !== undefined) message.reasoning = msg.reasoning;
+            if (msg.finish) message.finish = msg.finish;
             
             return {
               id: resp.id || null,
               model: resp.model || null,
-              messages: message.content ? [message] : [] 
+              messages: message.content || msg.reasoning_content ? [message] : []
             };
           }) : []
         };
