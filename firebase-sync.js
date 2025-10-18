@@ -1,5 +1,5 @@
 /*──────────────────────────────────────────────────────────────
-  TypingMind – Firebase Cloud-Sync v1.0 (Oct-2025)
+  TypingMind – Firebase Cloud-Sync V1.1 (Oct-2025)
 ──────────────────────────────────────────────────────────────*/
 if (window.typingMindFirebaseSync) {
   console.log("Firebase Sync already loaded");
@@ -21,6 +21,7 @@ if (window.typingMindFirebaseSync) {
         storageBucket: '',
         syncInterval: 60,
         workspaceId: '',
+        notificationsEnabled: true,
       };
       const stored = {};
       const keyMap = {
@@ -30,11 +31,18 @@ if (window.typingMindFirebaseSync) {
         storageBucket: 'tcs_fb_storageBucket',
         syncInterval: 'tcs_fb_syncInterval',
         workspaceId: 'tcs_fb_workspaceId',
+        notificationsEnabled: 'tcs_fb_notificationsEnabled',
       };
       Object.keys(defaults).forEach(key => {
         const val = localStorage.getItem(keyMap[key]);
         if (val !== null) {
-          stored[key] = key === 'syncInterval' ? parseInt(val) || 60 : val;
+          if (key === 'syncInterval') {
+            stored[key] = parseInt(val) || 60;
+          } else if (key === 'notificationsEnabled') {
+            stored[key] = val === 'true';
+          } else {
+            stored[key] = val;
+          }
         }
       });
       return { ...defaults, ...stored };
@@ -49,6 +57,7 @@ if (window.typingMindFirebaseSync) {
         storageBucket: 'tcs_fb_storageBucket',
         syncInterval: 'tcs_fb_syncInterval',
         workspaceId: 'tcs_fb_workspaceId',
+        notificationsEnabled: 'tcs_fb_notificationsEnabled',
       };
       Object.keys(this.config).forEach(key => {
         const storageKey = keyMap[key];
@@ -100,6 +109,7 @@ if (window.typingMindFirebaseSync) {
       this.sdkLoaded = false;
       this.isSyncing = false;
       this.lastSyncTimestamps = {};
+      this.lastFolderSyncTimestamps = {};
     }
 
     getDeviceId() {
@@ -284,7 +294,7 @@ if (window.typingMindFirebaseSync) {
       }
 
       this.isSyncing = true;
-      this.logger.log('start', 'Smart sync with folders & deletion tracking...');
+      this.logger.log('start', 'Smart sync with folders, threads & multi-models...');
 
       try {
         this.logger.log('info', '📁 Syncing folders...');
@@ -298,10 +308,14 @@ if (window.typingMindFirebaseSync) {
 
         for (const folder of localFolders) {
           if (!remoteDeletedFolderIds.includes(folder.id)) {
-            try {
-              await this.uploadFolder(folder);
-            } catch (error) {
-              this.logger.log('error', `Folder upload failed: ${folder.id}`, error.message);
+            const needsUpload = this.folderNeedsUpload(folder);
+            if (needsUpload) {
+              try {
+                await this.uploadFolder(folder);
+                this.lastFolderSyncTimestamps[folder.id] = Date.now();
+              } catch (error) {
+                this.logger.log('error', `Folder upload failed: ${folder.id}`, error.message);
+              }
             }
           }
         }
@@ -310,10 +324,12 @@ if (window.typingMindFirebaseSync) {
         this.logger.log('info', `Remote folders: ${remoteFolders.length}`);
         
         let foldersCreated = 0;
+        let foldersUpdated = 0;
         for (const remoteFolder of remoteFolders) {
           try {
-            const wasCreated = this.mergeRemoteFolder(remoteFolder);
-            if (wasCreated) foldersCreated++;
+            const result = this.mergeRemoteFolder(remoteFolder);
+            if (result === 'created') foldersCreated++;
+            if (result === 'updated') foldersUpdated++;
           } catch (error) {
             this.logger.log('error', `Folder merge failed: ${remoteFolder.id}`, error.message);
           }
@@ -321,6 +337,9 @@ if (window.typingMindFirebaseSync) {
 
         if (foldersCreated > 0) {
           this.logger.log('success', `Created ${foldersCreated} folders`);
+        }
+        if (foldersUpdated > 0) {
+          this.logger.log('success', `Updated ${foldersUpdated} folders`);
         }
 
         const foldersToDeleteLocally = localFolderIds.filter(id => 
@@ -415,7 +434,8 @@ if (window.typingMindFirebaseSync) {
           
           const lastSync = this.lastSyncTimestamps[chat.id] || 0;
           const chatUpdated = chat.data.updatedAt || 0;
-          const chatUpdatedMs = typeof chatUpdated === 'string' ? Date.parse(chatUpdated) : chatUpdated;
+          const chatUpdatedMs = typeof chatUpdated === 'string' ? Date.parse(chatUpdated) : 
+                                chatUpdated instanceof Date ? chatUpdated.getTime() : chatUpdated;
           return chatUpdatedMs > lastSync;
         });
 
@@ -472,6 +492,7 @@ if (window.typingMindFirebaseSync) {
         }
 
         this.logger.log('success', 'SYNC COMPLETE');
+        this.saveFolderSyncTimestamps();
 
       } catch (error) {
         this.logger.log('error', 'Sync failed', error);
@@ -481,11 +502,38 @@ if (window.typingMindFirebaseSync) {
       }
     }
 
+    folderNeedsUpload(folder) {
+      const lastSync = this.lastFolderSyncTimestamps[folder.id] || 0;
+      const folderUpdated = folder.data.updatedAt || 0;
+      const folderUpdatedMs = typeof folderUpdated === 'string' ? Date.parse(folderUpdated) : 
+                              folderUpdated instanceof Date ? folderUpdated.getTime() : folderUpdated;
+      return folderUpdatedMs > lastSync;
+    }
+
     saveLastSyncTimestamps() {
       try {
         localStorage.setItem('tcs_fb_lastSyncTimestamps', JSON.stringify(this.lastSyncTimestamps));
       } catch (e) {
         this.logger.log('warning', 'Failed to save sync timestamps');
+      }
+    }
+
+    saveFolderSyncTimestamps() {
+      try {
+        localStorage.setItem('tcs_fb_lastFolderSyncTimestamps', JSON.stringify(this.lastFolderSyncTimestamps));
+      } catch (e) {
+        this.logger.log('warning', 'Failed to save folder sync timestamps');
+      }
+    }
+
+    loadFolderSyncTimestamps() {
+      try {
+        const stored = localStorage.getItem('tcs_fb_lastFolderSyncTimestamps');
+        if (stored) {
+          this.lastFolderSyncTimestamps = JSON.parse(stored);
+        }
+      } catch (e) {
+        this.lastFolderSyncTimestamps = {};
       }
     }
 
@@ -626,11 +674,15 @@ if (window.typingMindFirebaseSync) {
         color: folder.data.color || null,
         open: folder.data.open || false,
         new: folder.data.new || false,
+        order: folder.data.order ?? 0,
+        createdAt: folder.data.createdAt ? this.validateTimestamp(folder.data.createdAt) : firebase.firestore.FieldValue.serverTimestamp(),
         updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        deletedAt: folder.data.deletedAt || null,
+        syncedAt: folder.data.syncedAt || null,
         lastDevice: this.deviceId,
       };
 
-      this.logger.log('info', `Upload folder [${folder.id}]: ${data.title}`);
+      this.logger.log('info', `Upload folder [${folder.id}]: ${data.title} (order:${data.order})`);
       
       await docRef.set(data);
     }
@@ -653,6 +705,11 @@ if (window.typingMindFirebaseSync) {
           color: data.color || null,
           open: data.open || false,
           new: data.new || false,
+          order: data.order ?? 0,
+          createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : Date.now(),
+          updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : Date.now(),
+          deletedAt: data.deletedAt,
+          syncedAt: data.syncedAt,
           lastDevice: data.lastDevice
         };
       });
@@ -675,21 +732,49 @@ if (window.typingMindFirebaseSync) {
             title: remoteFolder.title,
             color: remoteFolder.color || null,
             open: remoteFolder.open || false,
-            new: false
+            new: false,
+            order: remoteFolder.order ?? 0,
+            createdAt: new Date(remoteFolder.createdAt).toISOString(),
+            updatedAt: new Date(remoteFolder.updatedAt).toISOString(),
+            deletedAt: remoteFolder.deletedAt || null,
+            syncedAt: new Date().toISOString(),
           };
           
           folderList.push(newFolder);
+          folderList.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
           localStorage.setItem('TM_useFolderList', JSON.stringify(folderList));
           
           this.logger.log('info', `Created folder [${remoteFolder.id}]: ${remoteFolder.title}`);
-          return true;
+          return 'created';
         } else {
-          this.logger.log('info', `Skip folder [${remoteFolder.id}]: already exists`);
-          return false;
+          const localFolder = folderList[existingIndex];
+          const localUpdatedAt = localFolder.updatedAt ? Date.parse(localFolder.updatedAt) : 0;
+          const remoteUpdatedAt = remoteFolder.updatedAt || 0;
+          
+          if (remoteUpdatedAt > localUpdatedAt && remoteFolder.lastDevice !== this.deviceId) {
+            folderList[existingIndex] = {
+              ...localFolder,
+              title: remoteFolder.title,
+              color: remoteFolder.color || null,
+              open: remoteFolder.open || false,
+              order: remoteFolder.order ?? localFolder.order ?? 0,
+              updatedAt: new Date(remoteFolder.updatedAt).toISOString(),
+              syncedAt: new Date().toISOString(),
+            };
+            
+            folderList.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+            localStorage.setItem('TM_useFolderList', JSON.stringify(folderList));
+            this.lastFolderSyncTimestamps[remoteFolder.id] = Date.now();
+            
+            this.logger.log('info', `Updated folder [${remoteFolder.id}]: ${remoteFolder.title}`);
+            return 'updated';
+          } else {
+            return 'skipped';
+          }
         }
       } catch (error) {
         this.logger.log('error', 'Failed to merge folder', error.message);
-        return false;
+        return 'error';
       }
     }
 
@@ -776,6 +861,10 @@ if (window.typingMindFirebaseSync) {
       
       const folderID = chat.data.folderID || chat.data.folderId || null;
       
+      const selectedMultimodelIDs = Array.isArray(chat.data.selectedMultimodelIDs) 
+        ? chat.data.selectedMultimodelIDs 
+        : [];
+      
       const data = {
         id: chat.id,
         chatID: chat.data.chatID || chat.id,
@@ -783,7 +872,7 @@ if (window.typingMindFirebaseSync) {
         model: chat.data.model || null,
         modelTitle: modelTitle,
         modelInfo: chat.data.modelInfo || null,
-        selectedMultimodelIDs: chat.data.selectedMultimodelIDs || [],
+        selectedMultimodelIDs: selectedMultimodelIDs,
         folderID: folderID,
         chatParams: chat.data.chatParams || null,
         character: chat.data.character || null,
@@ -801,8 +890,9 @@ if (window.typingMindFirebaseSync) {
         : 'no-usage';
       
       const folderInfo = folderID ? `folder:${folderID}` : 'no-folder';
+      const multiModelInfo = selectedMultimodelIDs.length > 1 ? `multi:${selectedMultimodelIDs.length}` : '';
 
-      this.logger.log('info', `Upload [${chat.id}]: ${messages.length}msgs, ${tokensInfo}, ${folderInfo}`);
+      this.logger.log('info', `Upload [${chat.id}]: ${messages.length}msgs, ${tokensInfo}, ${folderInfo} ${multiModelInfo}`);
       
       await docRef.set(data);
     }
@@ -841,6 +931,25 @@ if (window.typingMindFirebaseSync) {
         })
         .map((m, idx) => {
           try {
+            if (m.type === 'tm_multi_responses') {
+              const clean = {
+                type: 'tm_multi_responses',
+                uuid: m.uuid || null,
+                createdAt: this.validateTimestamp(m.createdAt, `${chatId}.msg[${idx}].createdAt`).toMillis(),
+                responses: Array.isArray(m.responses) ? m.responses.map((resp, respIdx) => {
+                  return {
+                    role: resp.role || 'assistant',
+                    content: typeof resp.content === 'string' ? resp.content : JSON.stringify(resp.content),
+                    model: resp.model || null,
+                    usage: resp.usage || null,
+                    uuid: resp.uuid || null,
+                    createdAt: resp.createdAt ? this.validateTimestamp(resp.createdAt, `${chatId}.msg[${idx}].resp[${respIdx}].createdAt`).toMillis() : Date.now(),
+                  };
+                }) : []
+              };
+              return clean;
+            }
+
             let textContent = '';
             
             if (typeof m.content === 'string') {
@@ -874,6 +983,39 @@ if (window.typingMindFirebaseSync) {
             if (m.uuid) clean.uuid = String(m.uuid).slice(0, 100);
             if (m.model) clean.model = String(m.model).slice(0, 100);
             if (m.usage) clean.usage = m.usage;
+            if (m.updatedAt) clean.updatedAt = this.validateTimestamp(m.updatedAt, `${chatId}.msg[${idx}].updatedAt`).toMillis();
+            
+            if (m.threads && Array.isArray(m.threads) && m.threads.length > 0) {
+              clean.threads = m.threads.map((thread, threadIdx) => {
+                return {
+                  createdAt: thread.createdAt ? this.validateTimestamp(thread.createdAt, `${chatId}.msg[${idx}].thread[${threadIdx}].createdAt`).toMillis() : Date.now(),
+                  userMessageContent: thread.userMessageContent || null,
+                  messages: Array.isArray(thread.messages) ? thread.messages.map((tm, tmIdx) => {
+                    let threadMsgContent = '';
+                    if (typeof tm.content === 'string') {
+                      threadMsgContent = tm.content;
+                    } else if (Array.isArray(tm.content)) {
+                      threadMsgContent = tm.content
+                        .filter(part => part && part.type === 'text' && part.text)
+                        .map(part => part.text)
+                        .join('\n');
+                    } else {
+                      threadMsgContent = JSON.stringify(tm.content);
+                    }
+                    
+                    return {
+                      role: tm.role || 'user',
+                      content: String(threadMsgContent).slice(0, 100000),
+                      uuid: tm.uuid || null,
+                      model: tm.model || null,
+                      usage: tm.usage || null,
+                      createdAt: tm.createdAt ? this.validateTimestamp(tm.createdAt, `${chatId}.msg[${idx}].thread[${threadIdx}].msg[${tmIdx}].createdAt`).toMillis() : Date.now(),
+                    };
+                  }) : []
+                };
+              });
+              this.logger.log('info', `${chatId}.msg[${idx}]: ${clean.threads.length} edit thread(s)`);
+            }
             
             if (m.reasoning_content) clean.reasoning_content = String(m.reasoning_content).slice(0, 100000);
             if (m.reasoning_summary) clean.reasoning_summary = m.reasoning_summary;
@@ -979,7 +1121,7 @@ if (window.typingMindFirebaseSync) {
 
           const localTime = typeof localChat.updatedAt === 'string' 
             ? Date.parse(localChat.updatedAt) 
-            : (localChat.updatedAt || 0);
+            : (localChat.updatedAt instanceof Date ? localChat.updatedAt.getTime() : localChat.updatedAt || 0);
           const remoteTime = remoteChat.updatedAt || 0;
 
           if (remoteTime > localTime && remoteChat.lastDevice !== this.deviceId) {
@@ -1014,6 +1156,24 @@ if (window.typingMindFirebaseSync) {
     }
 
     reconstructMessage(m) {
+      if (m.type === 'tm_multi_responses') {
+        return {
+          type: 'tm_multi_responses',
+          uuid: m.uuid || null,
+          createdAt: new Date(m.createdAt).toISOString(),
+          responses: Array.isArray(m.responses) ? m.responses.map(resp => {
+            return {
+              role: resp.role || 'assistant',
+              content: resp.content,
+              model: resp.model || null,
+              usage: resp.usage || null,
+              uuid: resp.uuid || null,
+              createdAt: resp.createdAt ? new Date(resp.createdAt).toISOString() : new Date().toISOString(),
+            };
+          }) : []
+        };
+      }
+
       let messageRole = m.role || 'user';
       if (messageRole === 'undefined' || !messageRole) {
         if (m._reasoning_start || m.reasoning_content || m.model || m.usage) {
@@ -1041,6 +1201,26 @@ if (window.typingMindFirebaseSync) {
       if (m.uuid) reconstructed.uuid = m.uuid;
       if (m.model) reconstructed.model = m.model;
       if (m.usage) reconstructed.usage = m.usage;
+      if (m.updatedAt) reconstructed.updatedAt = new Date(m.updatedAt).toISOString();
+
+      if (m.threads && Array.isArray(m.threads) && m.threads.length > 0) {
+        reconstructed.threads = m.threads.map(thread => {
+          return {
+            createdAt: new Date(thread.createdAt).toISOString(),
+            userMessageContent: thread.userMessageContent || null,
+            messages: Array.isArray(thread.messages) ? thread.messages.map(tm => {
+              return {
+                role: tm.role || 'user',
+                content: tm.content,
+                uuid: tm.uuid || null,
+                model: tm.model || null,
+                usage: tm.usage || null,
+                createdAt: tm.createdAt ? new Date(tm.createdAt).toISOString() : new Date().toISOString(),
+              };
+            }) : []
+          };
+        });
+      }
 
       if (m.reasoning_content) reconstructed.reasoning_content = m.reasoning_content;
       if (m.reasoning_summary) reconstructed.reasoning_summary = m.reasoning_summary;
@@ -1077,6 +1257,8 @@ if (window.typingMindFirebaseSync) {
       this.config = new ConfigManager();
       this.firebase = new FirebaseService(this.config, this.logger, this);
       this.autoSyncInterval = null;
+      this.countdownInterval = null;
+      this.nextSyncTime = null;
       this.setupAutoRefresh();
     }
     
@@ -1106,6 +1288,11 @@ if (window.typingMindFirebaseSync) {
     }
 
     showSyncNotification(count, action = 'synced') {
+      if (!this.config.get('notificationsEnabled')) {
+        this.logger.log('info', `Notifications disabled, skipping (${count} ${action})`);
+        return;
+      }
+
       const existingNotif = document.querySelector('.tm-sync-notification');
       if (existingNotif) existingNotif.remove();
 
@@ -1160,13 +1347,14 @@ if (window.typingMindFirebaseSync) {
     }
     
     async initialize() {
-      this.logger.log('start', 'Firebase Sync v3.7 FINAL');
+      this.logger.log('start', 'Firebase Sync V1.1');
       await this.waitForDOM();
       this.insertSyncButton();
 
       if (this.config.isConfigured()) {
         try {
           this.firebase.loadLastSyncTimestamps();
+          this.firebase.loadFolderSyncTimestamps();
           
           await this.firebase.initialize();
           this.updateSyncStatus('success');
@@ -1251,6 +1439,43 @@ if (window.typingMindFirebaseSync) {
       this.createModal();
     }
     
+    updateCountdownDisplay() {
+      const countdownEl = document.getElementById('sync-countdown');
+      if (!countdownEl || !this.nextSyncTime) return;
+
+      const now = Date.now();
+      const remaining = Math.max(0, this.nextSyncTime - now);
+      
+      if (remaining === 0) {
+        countdownEl.textContent = 'Syncing...';
+        return;
+      }
+
+      const minutes = Math.floor(remaining / 60000);
+      const seconds = Math.floor((remaining % 60000) / 1000);
+      
+      countdownEl.textContent = `Next sync in ${minutes}:${seconds.toString().padStart(2, '0')}`;
+    }
+
+    startCountdown() {
+      if (this.countdownInterval) {
+        clearInterval(this.countdownInterval);
+      }
+
+      this.countdownInterval = setInterval(() => {
+        this.updateCountdownDisplay();
+      }, 1000);
+
+      this.updateCountdownDisplay();
+    }
+
+    stopCountdown() {
+      if (this.countdownInterval) {
+        clearInterval(this.countdownInterval);
+        this.countdownInterval = null;
+      }
+    }
+    
     createModal() {
       const overlay = document.createElement('div');
       overlay.className = 'modal-overlay';
@@ -1258,11 +1483,11 @@ if (window.typingMindFirebaseSync) {
       
       const modal = document.createElement('div');
       modal.className = 'cloud-sync-modal';
-      modal.style.cssText = 'width:100%;max-width:32rem;background:#27272a;color:#fff;border-radius:0.5rem;padding:1.5rem;border:1px solid rgba(255,255,255,0.1);';
+      modal.style.cssText = 'width:100%;max-width:32rem;background:#27272a;color:#fff;border-radius:0.5rem;padding:1.5rem;border:1px solid rgba(255,255,255,0.1);max-height:90vh;overflow-y:auto;';
       
       modal.innerHTML = `
         <div class="text-white text-sm">
-          <h3 class="text-center text-xl font-bold mb-4">Firebase Sync v3.7</h3>
+          <h3 class="text-center text-xl font-bold mb-4">Firebase Sync V1.1</h3>
           
           <div class="bg-blue-900/30 border border-blue-700 rounded p-3 mb-4 text-xs">
             <strong>Setup:</strong><br>
@@ -1302,32 +1527,54 @@ if (window.typingMindFirebaseSync) {
             </div>
             
             <div>
-              <label class="block text-xs text-zinc-400 mb-1">Auto-sync (minutes)</label>
+              <label class="block text-xs text-zinc-400 mb-1">Auto-sync interval (minutes)</label>
               <input id="fb-syncInterval" type="number" min="1" style="width:100%;padding:8px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff" value="${this.config.get('syncInterval')/60}">
+            </div>
+            
+            <div class="pt-3 border-t border-zinc-700">
+              <label class="flex items-center gap-3 cursor-pointer">
+                <input id="fb-notifications" type="checkbox" ${this.config.get('notificationsEnabled') ? 'checked' : ''} class="w-5 h-5 rounded border-zinc-600 bg-zinc-700 text-blue-600 focus:ring-blue-500 focus:ring-2 cursor-pointer">
+                <span class="text-sm">Enable sync notifications</span>
+              </label>
+              <p class="text-xs text-zinc-500 mt-1 ml-8">Show popup when chats are synced or deleted</p>
+            </div>
+
+            <div id="countdown-container" class="bg-zinc-800/50 rounded p-3 text-center" style="display:${this.nextSyncTime ? 'block' : 'none'}">
+              <div id="sync-countdown" class="text-sm text-zinc-300 font-mono"></div>
             </div>
           </div>
 
           <div class="flex gap-2 mb-3">
-            <button id="save-settings" class="flex-1 px-4 py-2 bg-blue-600 rounded hover:bg-blue-700">Save</button>
-            <button id="sync-now" class="flex-1 px-4 py-2 bg-green-600 rounded hover:bg-green-700" ${this.config.isConfigured() ? '' : 'disabled'}>Sync Now</button>
-            <button id="close-modal" class="px-4 py-2 bg-zinc-700 rounded hover:bg-zinc-600">Close</button>
+            <button id="save-settings" class="flex-1 px-4 py-2 bg-blue-600 rounded hover:bg-blue-700 transition-colors">Save</button>
+            <button id="sync-now" class="flex-1 px-4 py-2 bg-green-600 rounded hover:bg-green-700 transition-colors" ${this.config.isConfigured() ? '' : 'disabled'}>Sync Now</button>
+            <button id="close-modal" class="px-4 py-2 bg-zinc-700 rounded hover:bg-zinc-600 transition-colors">Close</button>
           </div>
           
           <div id="action-msg" class="text-center text-sm text-zinc-400"></div>
           
           <div class="text-center mt-4 pt-3 text-xs text-zinc-500 border-t border-zinc-700">
-            v3.7 FINAL - Device: ${this.firebase.deviceId.substr(0, 15)}... - Add ?log=true for debug
+            V1.1 - Device: ${this.firebase.deviceId.substr(0, 15)}... - Add ?log=true for debug
           </div>
         </div>`;
       
       overlay.appendChild(modal);
       document.body.appendChild(overlay);
+
+      if (this.nextSyncTime) {
+        this.startCountdown();
+      }
       
       overlay.addEventListener('click', (e) => { 
-        if (e.target === overlay) overlay.remove(); 
+        if (e.target === overlay) {
+          this.stopCountdown();
+          overlay.remove();
+        }
       });
       
-      modal.querySelector('#close-modal').addEventListener('click', () => overlay.remove());
+      modal.querySelector('#close-modal').addEventListener('click', () => {
+        this.stopCountdown();
+        overlay.remove();
+      });
       modal.querySelector('#save-settings').addEventListener('click', () => this.saveSettings(modal, overlay));
       modal.querySelector('#sync-now').addEventListener('click', () => this.handleSyncNow(modal));
     }
@@ -1343,6 +1590,7 @@ if (window.typingMindFirebaseSync) {
         storageBucket: get('#fb-storageBucket'),
         workspaceId: get('#fb-workspaceId'),
         syncInterval: parseInt(get('#fb-syncInterval')) * 60,
+        notificationsEnabled: modal.querySelector('#fb-notifications').checked,
       };
 
       if (!newConfig.apiKey || !newConfig.authDomain || !newConfig.projectId || !newConfig.storageBucket) {
@@ -1363,6 +1611,7 @@ if (window.typingMindFirebaseSync) {
       actionMsg.textContent = 'Saved! Reloading...';
       actionMsg.style.color = '#22c55e';
       
+      this.stopCountdown();
       setTimeout(() => window.location.reload(), 1000);
     }
     
@@ -1379,6 +1628,9 @@ if (window.typingMindFirebaseSync) {
         actionMsg.textContent = 'Sync complete!';
         actionMsg.style.color = '#22c55e';
         this.updateSyncStatus('success');
+        
+        this.nextSyncTime = Date.now() + (this.config.get('syncInterval') * 1000);
+        this.updateCountdownDisplay();
       } catch (e) {
         actionMsg.textContent = e.message;
         actionMsg.style.color = '#ef4444';
@@ -1396,6 +1648,8 @@ if (window.typingMindFirebaseSync) {
       
       const intervalMs = this.config.get('syncInterval') * 1000;
       
+      this.nextSyncTime = Date.now() + intervalMs;
+      
       this.autoSyncInterval = setInterval(async () => {
         if (this.firebase.isSyncing) return;
         
@@ -1409,6 +1663,8 @@ if (window.typingMindFirebaseSync) {
           this.logger.log('error', 'Auto-sync failed', e);
           this.updateSyncStatus('error');
         }
+
+        this.nextSyncTime = Date.now() + intervalMs;
       }, intervalMs);
       
       this.logger.log('success', `Auto-sync every ${intervalMs/1000}s`);
