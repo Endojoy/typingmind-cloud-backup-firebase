@@ -1224,19 +1224,52 @@ if (window.typingMindFirebaseSync) {
 
       if (m.threads && Array.isArray(m.threads) && m.threads.length > 0) {
         reconstructed.threads = m.threads.map(thread => {
+          const threadMessages = Array.isArray(thread.messages) ? thread.messages : [];
+          
+          const hasUserMessage = threadMessages.some(tm => tm.role === 'user');
+          let finalMessages = [...threadMessages];
+          
+          if (!hasUserMessage && thread.userMessageContent) {
+            const userMsg = {
+              role: 'user',
+              content: thread.userMessageContent,
+              createdAt: thread.createdAt,
+              uuid: null
+            };
+            finalMessages.unshift(userMsg);
+          }
+          
           return {
             createdAt: new Date(thread.createdAt).toISOString(),
             userMessageContent: thread.userMessageContent || null,
-            messages: Array.isArray(thread.messages) ? thread.messages.map(tm => {
+            messages: finalMessages.map(tm => {
+              let tmRole = tm.role;
+              if (!tmRole || tmRole === 'undefined') {
+                if (tm.model || tm.usage) {
+                  tmRole = 'assistant';
+                } else {
+                  tmRole = 'user';
+                }
+              }
+              
+              let tmContent;
+              if (typeof tm.content === 'string') {
+                tmContent = tm.content;
+              } else if (Array.isArray(tm.content)) {
+                tmContent = tm.content;
+              } else {
+                tmContent = String(tm.content || '');
+              }
+              
               return {
-                role: tm.role || 'user',
-                content: tm.content,
+                role: tmRole, 
+                content: tmContent,
                 uuid: tm.uuid || null,
                 model: tm.model || null,
                 usage: tm.usage || null,
                 createdAt: tm.createdAt ? new Date(tm.createdAt).toISOString() : new Date().toISOString(),
               };
-            }) : []
+            })
           };
         });
       }
@@ -1249,6 +1282,7 @@ if (window.typingMindFirebaseSync) {
 
       return reconstructed;
     }
+
 
     async getIndexedDB() {
       return new Promise((resolve, reject) => {
