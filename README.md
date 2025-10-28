@@ -3,7 +3,7 @@
 A powerful browser extension for **TypingMind** that enables real-time cloud synchronization across multiple devices using **Firebase Firestore**.
 
 [![Version](https://img.shields.io/badge/version-1.0-blue.svg)](https://github.com/Endojoy/typingmind-cloud-backup-firebase)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![License](https://camo.githubusercontent.com/18a59883b89ed6ee32c4afc2c93f81e65ec844d96f708b1499eb234a796889b6/68747470733a2f2f696d672e736869656c64732e696f2f62616467652f4c6963656e73652d434325323042592d2d4e432d2d5341253230342e302d677265656e)](LICENSE)
 
 ## 🌟 Features
 
@@ -309,7 +309,7 @@ Contributions are welcome! Please feel free to submit issues or pull requests.
 
 ## 📄 License
 
-MIT License - feel free to use and modify!
+This project is licensed under the [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) License. See the [LICENSE](LICENSE) file for details.
 
 ## 💬 Support
 
