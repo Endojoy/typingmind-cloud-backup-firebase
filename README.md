@@ -2,14 +2,19 @@
 
 A powerful browser extension for **TypingMind** that enables real-time cloud synchronization across multiple devices using **Firebase Firestore**.
 
-[![Version](https://img.shields.io/badge/version-1.0-blue.svg)](https://github.com/Endojoy/typingmind-cloud-backup-firebase)
+[![Version](https://img.shields.io/badge/version-1.5-blue.svg)](https://github.com/Endojoy/typingmind-cloud-backup-firebase)
 [![License](https://camo.githubusercontent.com/18a59883b89ed6ee32c4afc2c93f81e65ec844d96f708b1499eb234a796889b6/68747470733a2f2f696d672e736869656c64732e696f2f62616467652f4c6963656e73652d434325323042592d2d4e432d2d5341253230342e302d677265656e)](LICENSE)
 
 ## 🌟 Features
 
-### Current Features (v1.0)
+### Current Features (v1.5)
 
 - **🔄 Real-time Synchronization**: Automatically sync your chats across all devices
+- **🔑 Custom localStorage Sync**: Sync your TypingMind settings and preferences
+  - Select specific keys to synchronize
+  - Categorized key organization (Settings, UI, Models, etc.)
+  - Smart bidirectional conflict resolution
+  - Search and bulk selection tools
 - **☁️ Firebase Firestore Backend**: Secure and reliable cloud storage
 - **🔐 Anonymous Authentication**: No account creation required - each device gets its own anonymous account
 - **🌐 Multi-device Support**: Share the same workspace across unlimited devices
@@ -50,7 +55,8 @@ A powerful browser extension for **TypingMind** that enables real-time cloud syn
 | **Free Tier** | ✅ Up to 1GB + $275 credit*** | ❌ 1TB minimum (~$6/month) | ✅ Up to 50MB |
 | **Stability** | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
 | **Offline Support** | ✅ Yes | ❌ No | ✅ Yes |
-| **Bandwidth Usage****** | 🟢 Very Low | 🔴 Very High | 🟡 Unknow |
+| **Bandwidth Usage****** | 🟢 Very Low | 🔴 Very High | 🟡 Unknown |
+| **Settings Sync** | ✅ Yes | ✅ Yes | ✅ Yes |
 | **Attachment Support** | 🚧 Coming Soon | ✅ Yes | ✅ Yes |
 | **Setup Complexity** | 🟡 Medium | 🔴 Complex | 🟢 Easy |
 | **Data Control** | ✅ Your Firebase | ✅ Your S3 | ❌ TypingMind servers |
@@ -70,6 +76,7 @@ A powerful browser extension for **TypingMind** that enables real-time cloud syn
 - You want a free solution for moderate usage (< 1GB)
 - You need low bandwidth usage with granular sync
 - You want to work on multiple devices simultaneously
+- You want to sync your TypingMind settings and preferences
 - You prefer automatic conflict resolution
 - You're a new Google Cloud user ($275 free credits)
 
@@ -175,8 +182,27 @@ Click **"Publish"**
    - This can be any identifier you choose
    - **Use the SAME Workspace ID on all devices** you want to sync
 4. Set auto-sync interval (default: 1 minute)
-5. Click **"Save"**
-6. Page will reload automatically
+5. (Optional) Enable sync notifications
+6. Click **"Save"**
+7. Page will reload automatically
+
+### 8. Configure Custom Keys Sync (Optional)
+
+Synchronize your TypingMind settings across devices:
+
+1. Click the **"Sync"** button in the sidebar
+2. Scroll to **"Custom Keys to Sync"** section
+3. Use the search bar to find specific settings
+4. Select keys you want to sync:
+   - **Settings**: Default model, system message, parameters
+   - **UI Preferences**: Font size, theme, layout
+   - **Models & AI**: Model configurations, reasoning settings
+   - **Budget & Usage**: Budget configurations, usage stats
+   - And more...
+5. Use **"Select All"** or **"Deselect All"** for quick selection
+6. Click **"Save"**
+
+💡 **Tip**: Start by syncing only essential settings like `TM_useDefaultModel` and `TM_useFontSize`, then add more as needed.
 
 ## 💡 How It Works
 
@@ -202,26 +228,49 @@ Think of a **Workspace ID** as a shared folder:
 
 ### Sync Logic
 
+#### Chats & Folders
 1. **Upload**: Local changes are pushed to Firestore
 2. **Download**: Remote changes are fetched
 3. **Merge**: Conflicts resolved by timestamp comparison (newest wins)
 4. **Deletion Tracking**: Tombstones ensure deletions propagate
 5. **Smart Filtering**: Incomplete streaming messages are filtered out
 
+#### Custom localStorage Keys (v1.5)
+1. **Smart Detection**: Compares local and remote values
+2. **Timestamp Comparison**: Determines which version is newer
+3. **Bidirectional Sync**: 
+   - If local value changed after last sync → Upload to Firebase
+   - If remote value is newer → Download and apply locally
+4. **Selective Sync**: Only selected keys are synchronized
+5. **Conflict Prevention**: Automatic resolution based on modification time
+
 ## 🔍 Debug Mode
 
 Enable detailed logging by adding `?log=true` to your URL:
 
 ```
-https://yourtypingmind.com/?log=true
+https://typingmind.com/?log=true
 ```
 
 You'll see detailed console logs showing:
-- Sync operations
+- Sync operations (chats, folders, custom keys)
 - Message processing
 - Upload/download counts
 - Conflict resolutions
+- Timestamp comparisons
 - Error details
+
+Example logs for custom keys:
+```
+🔄 Syncing 5 custom keys...
+🆕 TM_useFontSize: Not in Firebase, will upload
+🔄 TM_useDefaultModel: Values differ
+   Local:  "gpt-4"
+   Remote: "claude-3-opus"
+   📥 Remote is newer, will download
+✅ TM_budgetConfig: Already in sync
+📊 Analysis: 1 upload, 1 download, 3 unchanged
+```
 
 ## ⚙️ Configuration Options
 
@@ -233,6 +282,8 @@ You'll see detailed console logs showing:
 | **Storage Bucket** | Firebase storage bucket | - |
 | **Workspace ID** | Shared workspace identifier | - |
 | **Auto-sync Interval** | Minutes between syncs | 1 |
+| **Notifications** | Show sync notifications | Enabled |
+| **Custom Keys** | localStorage keys to sync | None |
 
 ## 🛡️ Security Considerations
 
@@ -241,6 +292,7 @@ You'll see detailed console logs showing:
 - **Firestore Rules**: Authenticated users only
 - **No Personal Data**: User identifiers are device-specific UUIDs
 - **HTTPS Only**: All Firebase communication is encrypted
+- **Custom Keys**: Only manually selected keys are synchronized
 
 ⚠️ **Note**: Keep your Firebase API credentials private to prevent unauthorized access.
 
@@ -255,8 +307,16 @@ You'll see detailed console logs showing:
 ### Chats not syncing
 → Check that all devices use the **same Workspace ID**
 
+### Settings not syncing
+→ Ensure you've selected the keys to sync in the modal  
+→ Check that the same keys are selected on all devices
+
 ### Sync button shows red dot
-→ Last sync failed - click "Sync Now" and check console for errors
+→ Last sync failed - click "Sync Now" and check console for errors with `?log=true`
+
+### Custom key conflicts
+→ The newest change always wins based on timestamps  
+→ If you want to force a specific value, change it and wait for the next sync
 
 ## 📊 Data Structure
 
@@ -278,11 +338,48 @@ workspaces/
         - updatedAt
         - syncedAt
         - lastDevice
+    folders/
+      {folderId}/
+        - id
+        - title
+        - color
+        - order
+        - createdAt
+        - updatedAt
+        - lastDevice
+    customKeys/
+      {keyName}/
+        - key
+        - value
+        - updatedAt
+        - lastDevice
     deletions/
       {chatId}/
         - deletedAt
         - deletedBy
+    folder_deletions/
+      {folderId}/
+        - deletedAt
+        - deletedBy
 ```
+
+## 🎯 Use Cases
+
+### Personal Use
+- Sync between home computer and work laptop
+- Share settings across desktop and tablet
+- Maintain consistent preferences everywhere
+
+### Team Collaboration
+- Share workspace with team members
+- Everyone uses their own anonymous account
+- Common workspace ID for team chats
+
+### Multi-Device Workflow
+- Start conversation on desktop
+- Continue on mobile
+- Finish on tablet
+- All with same settings and preferences
 
 ## 🤝 Contributing
 
@@ -293,13 +390,24 @@ Contributions are welcome! Please feel free to submit issues or pull requests.
 1. Clone the repository
 2. Make your changes
 3. Test with `?log=true` enabled
-4. Submit a pull request
+4. Test custom key sync with different scenarios
+5. Submit a pull request
 
 ## 📝 Changelog
 
+### v1.5 (October 2025)
+- ✨ **NEW**: Custom localStorage keys synchronization
+- ✨ **NEW**: Categorized key selection with search
+- ✨ **NEW**: Smart bidirectional conflict resolution for settings
+- ✨ **NEW**: Bulk select/deselect for keys
+- ✨ **NEW**: Enhanced notifications for settings sync
+- 🔧 Improved sync logic with timestamp-based resolution
+- 🔧 Better handling of concurrent edits
+- 📊 Enhanced logging for custom keys
+
 ### v1.0 (October 2025)
 - Initial release
-- Real-time bidirectional sync
+- Real-time bidirectional sync for chats and folders
 - Anonymous authentication
 - Workspace-based architecture
 - Deletion tracking with tombstones
@@ -324,4 +432,4 @@ This project is licensed under the [CC BY-NC-SA 4.0](https://creativecommons.org
 
 ---
 
-**Made by Enjoy for the TypingMind community**
+**Made by Endojoy & Solva for the TypingMind community** 💙

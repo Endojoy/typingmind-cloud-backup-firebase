@@ -1,5 +1,5 @@
 /*──────────────────────────────────────────────────────────────
-  TypingMind – Firebase Cloud-Sync V1.0 (Oct-2025)
+  TypingMind – Firebase Cloud-Sync V1.5 (Oct-2025)
   + Custom localStorage Keys Sync with Smart Bidirectional Sync
 ──────────────────────────────────────────────────────────────*/
 if (window.typingMindFirebaseSync) {
@@ -1770,7 +1770,7 @@ if (window.typingMindFirebaseSync) {
     }
     
     async initialize() {
-      this.logger.log('start', 'Firebase Sync V1.2 (Smart Bidirectional Custom Keys)');
+      this.logger.log('start', 'Firebase Sync V1.5');
       await this.waitForDOM();
       this.insertSyncButton();
 
@@ -1915,7 +1915,7 @@ if (window.typingMindFirebaseSync) {
       
       modal.innerHTML = `
         <div class="text-white text-sm">
-          <h3 class="text-center text-xl font-bold mb-4">Firebase Sync V1.2</h3>
+          <h3 class="text-center text-xl font-bold mb-4">Firebase Sync V1.5</h3>
           
           <div class="bg-blue-900/30 border border-blue-700 rounded p-3 mb-4 text-xs">
             <strong>Setup:</strong><br>
@@ -2004,7 +2004,7 @@ if (window.typingMindFirebaseSync) {
           <div id="action-msg" class="text-center text-sm text-zinc-400"></div>
           
           <div class="text-center mt-4 pt-3 text-xs text-zinc-500 border-t border-zinc-700">
-            V1.2 - Device: ${this.firebase.deviceId.substr(0, 15)}... - Add ?log=true for debug
+            V1.5 - Device: ${this.firebase.deviceId.substr(0, 15)}... - Add ?log=true for debug
           </div>
         </div>`;
       
