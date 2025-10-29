@@ -1,6 +1,5 @@
 /*──────────────────────────────────────────────────────────────
   TypingMind – Firebase Cloud-Sync V1.5 (Oct-2025)
-  + Custom localStorage Keys Sync with Smart Bidirectional Sync
 ──────────────────────────────────────────────────────────────*/
 if (window.typingMindFirebaseSync) {
   console.log("Firebase Sync already loaded");

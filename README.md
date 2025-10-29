@@ -197,7 +197,6 @@ Synchronize your TypingMind settings across devices:
    - **Settings**: Default model, system message, parameters
    - **UI Preferences**: Font size, theme, layout
    - **Models & AI**: Model configurations, reasoning settings
-   - **Budget & Usage**: Budget configurations, usage stats
    - And more...
 5. Use **"Select All"** or **"Deselect All"** for quick selection
 6. Click **"Save"**
