@@ -1,5 +1,5 @@
 /*──────────────────────────────────────────────────────────────
-  TypingMind – Firebase Cloud-Sync V1.1 (Oct-2025)
+  TypingMind – Firebase Cloud-Sync V1.5 (Oct-2025)
 ──────────────────────────────────────────────────────────────*/
 if (window.typingMindFirebaseSync) {
   console.log("Firebase Sync already loaded");
@@ -75,6 +75,72 @@ if (window.typingMindFirebaseSync) {
         this.config.workspaceId
       );
     }
+    
+    getSelectedSyncKeys() {
+      try {
+        const stored = localStorage.getItem('tcs_fb_selectedSyncKeys');
+        return stored ? JSON.parse(stored) : [];
+      } catch {
+        return [];
+      }
+    }
+    
+    saveSelectedSyncKeys(keys) {
+      localStorage.setItem('tcs_fb_selectedSyncKeys', JSON.stringify(keys));
+    }
+    
+    getAvailableKeys() {
+      const excludePatterns = [
+        'tcs_fb_',           // Extension's own keys
+        'firestore_',        // Firestore internal keys
+        'referrer',          // Browser internal
+      ];
+      
+      return Object.keys(localStorage)
+        .filter(key => !excludePatterns.some(pattern => key.includes(pattern)))
+        .sort();
+    }
+    
+    categorizeKeys(keys) {
+      const categories = {
+        'Settings': [],
+        'UI Preferences': [],
+        'Data Management': [],
+        'Models & AI': [],
+        'Plugins & Extensions': [],
+        'Budget & Usage': [],
+        'Sync & Migration': [],
+        'Other': []
+      };
+      
+      keys.forEach(key => {
+        if (key.includes('Default') || key.includes('Settings')) {
+          categories['Settings'].push(key);
+        } else if (key.includes('Font') || key.includes('Theme') || key.includes('Layout') || key.includes('Expanded')) {
+          categories['UI Preferences'].push(key);
+        } else if (key.includes('Folder') || key.includes('Character') || key.includes('Deleted') || key.includes('Pinned')) {
+          categories['Data Management'].push(key);
+        } else if (key.includes('Model') || key.includes('Reasoning') || key.includes('Token') || key.includes('Safety')) {
+          categories['Models & AI'].push(key);
+        } else if (key.includes('Plugin') || key.includes('Extension')) {
+          categories['Plugins & Extensions'].push(key);
+        } else if (key.includes('budget') || key.includes('Budget') || key.includes('Usage') || key.includes('Cost')) {
+          categories['Budget & Usage'].push(key);
+        } else if (key.includes('Sync') || key.includes('MIGRATE') || key.includes('LAST_VERSION')) {
+          categories['Sync & Migration'].push(key);
+        } else {
+          categories['Other'].push(key);
+        }
+      });
+      
+      Object.keys(categories).forEach(cat => {
+        if (categories[cat].length === 0) {
+          delete categories[cat];
+        }
+      });
+      
+      return categories;
+    }
   }
 
   /* ============================================================
@@ -110,6 +176,7 @@ if (window.typingMindFirebaseSync) {
       this.isSyncing = false;
       this.lastSyncTimestamps = {};
       this.lastFolderSyncTimestamps = {};
+      this.lastCustomKeysSync = {};
     }
 
     getDeviceId() {
@@ -287,6 +354,206 @@ if (window.typingMindFirebaseSync) {
       );
     }
 
+    async syncCustomKeys() {
+      const selectedKeys = this.config.getSelectedSyncKeys();
+      if (selectedKeys.length === 0) {
+        this.logger.log('info', 'No custom keys selected for sync');
+        return;
+      }
+
+      this.logger.log('start', `Syncing ${selectedKeys.length} custom keys...`);
+
+      try {
+        const remoteValues = await this.getRemoteValues(selectedKeys);
+        
+        const toUpload = [];
+        const toDownload = [];
+        const unchanged = [];
+        
+        selectedKeys.forEach(key => {
+          const localValue = localStorage.getItem(key);
+          const remote = remoteValues.get(key);
+          
+          if (!remote) {
+            this.logger.log('info', `🆕 ${key}: Not in Firebase, will upload`);
+            toUpload.push(key);
+          } else if (localValue !== remote.value) {
+            const lastSync = this.lastCustomKeysSync[key] || 0;
+            
+            this.logger.log('info', `🔄 ${key}: Values differ`);
+            this.logger.log('info', `   Local:  "${localValue?.substring(0, 50)}"`);
+            this.logger.log('info', `   Remote: "${remote.value?.substring(0, 50)}"`);
+            this.logger.log('info', `   Last sync: ${new Date(lastSync).toISOString()}`);
+            this.logger.log('info', `   Remote updated: ${new Date(remote.updatedAt).toISOString()}`);
+            
+            if (lastSync >= remote.updatedAt) {
+              this.logger.log('success', `   📤 Local is newer, will upload`);
+              toUpload.push(key);
+            } else {
+              this.logger.log('success', `   📥 Remote is newer, will download`);
+              toDownload.push(key);
+            }
+          } else {
+            this.logger.log('info', `✅ ${key}: Already in sync`);
+            unchanged.push(key);
+            this.lastCustomKeysSync[key] = remote.updatedAt;
+          }
+        });
+        
+        this.logger.log('info', `📊 Analysis: ${toUpload.length} upload, ${toDownload.length} download, ${unchanged.length} unchanged`);
+        
+        if (toUpload.length > 0) {
+          await this.uploadSpecificKeys(toUpload);
+        }
+        
+        if (toDownload.length > 0) {
+          await this.downloadSpecificKeys(toDownload, remoteValues);
+        }
+        
+        this.saveCustomKeysSyncTimestamps();
+        
+        this.logger.log('success', 'Custom keys sync complete');
+      } catch (error) {
+        this.logger.log('error', 'Custom keys sync failed', error.message);
+        throw error;
+      }
+    }
+
+    async getRemoteValues(keys) {
+      const workspaceId = this.config.get('workspaceId');
+      const remoteValues = new Map();
+      
+      this.logger.log('info', `🔍 Fetching remote values for ${keys.length} keys...`);
+      
+      for (let i = 0; i < keys.length; i += 10) {
+        const chunk = keys.slice(i, Math.min(i + 10, keys.length));
+        
+        try {
+          const snapshot = await this.db
+            .collection('workspaces')
+            .doc(workspaceId)
+            .collection('customKeys')
+            .where('key', 'in', chunk)
+            .get();
+
+          snapshot.docs.forEach(doc => {
+            const data = doc.data();
+            remoteValues.set(data.key, {
+              value: data.value,
+              updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : 0,
+              lastDevice: data.lastDevice
+            });
+          });
+        } catch (error) {
+          this.logger.log('error', `Failed to fetch chunk: ${error.message}`);
+        }
+      }
+      
+      this.logger.log('info', `📥 Found ${remoteValues.size}/${keys.length} keys in Firebase`);
+      return remoteValues;
+    }
+
+    async uploadSpecificKeys(keys) {
+      const workspaceId = this.config.get('workspaceId');
+      const batch = this.db.batch();
+      let uploadCount = 0;
+      
+      this.logger.log('info', `📤 Uploading ${keys.length} keys...`);
+      
+      keys.forEach(key => {
+        const value = localStorage.getItem(key);
+        if (value === null) {
+          this.logger.log('warning', `⏭️  ${key}: Not in localStorage`);
+          return;
+        }
+        
+        const preview = value.length > 50 ? value.substring(0, 50) + '...' : value;
+        this.logger.log('success', `📤 ${key}: "${preview}"`);
+        
+        const docRef = this.db
+          .collection('workspaces')
+          .doc(workspaceId)
+          .collection('customKeys')
+          .doc(key);
+
+        batch.set(docRef, {
+          key: key,
+          value: value,
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+          lastDevice: this.deviceId
+        }, { merge: true });
+        
+        uploadCount++;
+      });
+      
+      if (uploadCount > 0) {
+        await batch.commit();
+        this.logger.log('success', `✅ Uploaded ${uploadCount} keys`);
+        
+        const now = Date.now();
+        keys.forEach(key => {
+          this.lastCustomKeysSync[key] = now;
+        });
+      }
+    }
+
+    async downloadSpecificKeys(keys, remoteValues) {
+      let mergedCount = 0;
+      
+      this.logger.log('info', `📥 Downloading ${keys.length} keys...`);
+      
+      keys.forEach(key => {
+        const remote = remoteValues.get(key);
+        if (!remote) {
+          this.logger.log('warning', `⏭️  ${key}: Not in remoteValues map`);
+          return;
+        }
+        
+        try {
+          const preview = remote.value.length > 50 ? remote.value.substring(0, 50) + '...' : remote.value;
+          
+          localStorage.setItem(key, remote.value);
+          this.lastCustomKeysSync[key] = remote.updatedAt;
+          mergedCount++;
+          
+          this.logger.log('success', `📥 ${key}: "${preview}"`);
+        } catch (error) {
+          this.logger.log('error', `❌ ${key}: ${error.message}`);
+        }
+      });
+      
+      if (mergedCount > 0) {
+        this.logger.log('success', `✅ Downloaded ${mergedCount} keys`);
+        
+        if (this.cloudSyncApp) {
+          this.cloudSyncApp.showSyncNotification(mergedCount, 'keys-synced');
+          
+          setTimeout(() => {
+            this.cloudSyncApp.triggerSoftRefresh();
+          }, 500);
+        }
+      }
+    }
+
+    saveCustomKeysSyncTimestamps() {
+      try {
+        localStorage.setItem('tcs_fb_lastCustomKeysSync', JSON.stringify(this.lastCustomKeysSync));
+      } catch (e) {
+        this.logger.log('warning', 'Failed to save custom keys sync timestamps');
+      }
+    }
+
+    loadCustomKeysSyncTimestamps() {
+      try {
+        const stored = localStorage.getItem('tcs_fb_lastCustomKeysSync');
+        if (stored) {
+          this.lastCustomKeysSync = JSON.parse(stored);
+        }
+      } catch (e) {
+        this.lastCustomKeysSync = {};
+      }
+    }
+
     async syncAllChats() {
       if (this.isSyncing) {
         this.logger.log('warning', 'Already syncing');
@@ -294,9 +561,11 @@ if (window.typingMindFirebaseSync) {
       }
 
       this.isSyncing = true;
-      this.logger.log('start', 'Smart sync with folders, threads & multi-models...');
+      this.logger.log('start', 'Smart sync with folders, threads, multi-models & custom keys...');
 
       try {
+        await this.syncCustomKeys();
+
         this.logger.log('info', '📁 Syncing folders...');
         
         const remoteDeletedFolderIds = await this.downloadDeletedFolderIds();
@@ -1442,11 +1711,21 @@ if (window.typingMindFirebaseSync) {
       const notif = document.createElement('div');
       notif.className = 'tm-sync-notification';
       
-      const bgColor = action === 'deleted' ? '#ef4444' : '#22c55e';
-      const icon = action === 'deleted' ? '🗑️' : '✓';
-      const text = action === 'deleted' 
-        ? `${count} chat${count > 1 ? 's' : ''} deleted`
-        : `${count} chat${count > 1 ? 's' : ''} synced`;
+      let bgColor, icon, text;
+      
+      if (action === 'deleted') {
+        bgColor = '#ef4444';
+        icon = '🗑️';
+        text = `${count} chat${count > 1 ? 's' : ''} deleted`;
+      } else if (action === 'keys-synced') {
+        bgColor = '#8b5cf6';
+        icon = '🔑';
+        text = `${count} setting${count > 1 ? 's' : ''} synced`;
+      } else {
+        bgColor = '#22c55e';
+        icon = '✓';
+        text = `${count} chat${count > 1 ? 's' : ''} synced`;
+      }
       
       notif.style.cssText = `
         position: fixed;
@@ -1490,7 +1769,7 @@ if (window.typingMindFirebaseSync) {
     }
     
     async initialize() {
-      this.logger.log('start', 'Firebase Sync V1.1');
+      this.logger.log('start', 'Firebase Sync V1.5');
       await this.waitForDOM();
       this.insertSyncButton();
 
@@ -1498,6 +1777,7 @@ if (window.typingMindFirebaseSync) {
         try {
           this.firebase.loadLastSyncTimestamps();
           this.firebase.loadFolderSyncTimestamps();
+          this.firebase.loadCustomKeysSyncTimestamps();
           
           await this.firebase.initialize();
           this.updateSyncStatus('success');
@@ -1626,11 +1906,15 @@ if (window.typingMindFirebaseSync) {
       
       const modal = document.createElement('div');
       modal.className = 'cloud-sync-modal';
-      modal.style.cssText = 'width:100%;max-width:32rem;background:#27272a;color:#fff;border-radius:0.5rem;padding:1.5rem;border:1px solid rgba(255,255,255,0.1);max-height:90vh;overflow-y:auto;';
+      modal.style.cssText = 'width:100%;max-width:40rem;background:#27272a;color:#fff;border-radius:0.5rem;padding:1.5rem;border:1px solid rgba(255,255,255,0.1);max-height:90vh;overflow-y:auto;';
+      
+      const selectedKeys = this.config.getSelectedSyncKeys();
+      const availableKeys = this.config.getAvailableKeys();
+      const categories = this.config.categorizeKeys(availableKeys);
       
       modal.innerHTML = `
         <div class="text-white text-sm">
-          <h3 class="text-center text-xl font-bold mb-4">Firebase Sync V1.1</h3>
+          <h3 class="text-center text-xl font-bold mb-4">Firebase Sync V1.5</h3>
           
           <div class="bg-blue-900/30 border border-blue-700 rounded p-3 mb-4 text-xs">
             <strong>Setup:</strong><br>
@@ -1682,6 +1966,29 @@ if (window.typingMindFirebaseSync) {
               <p class="text-xs text-zinc-500 mt-1 ml-8">Show popup when chats are synced or deleted</p>
             </div>
 
+            <!-- CUSTOM KEYS SECTION -->
+            <div class="pt-3 border-t border-zinc-700">
+              <div class="flex items-center justify-between mb-2">
+                <label class="block text-sm font-semibold">Custom Keys to Sync</label>
+                <span class="text-xs text-zinc-400" id="selected-count">${selectedKeys.length} selected</span>
+              </div>
+              
+              <div class="mb-2 flex gap-2">
+                <input 
+                  id="keys-search" 
+                  type="text" 
+                  placeholder="Search keys..." 
+                  style="flex:1;padding:6px;background:#3f3f46;border:1px solid #52525b;border-radius:4px;color:#fff;font-size:12px"
+                >
+                <button id="select-all-keys" class="px-3 py-1 bg-zinc-700 rounded hover:bg-zinc-600 text-xs">Select All</button>
+                <button id="deselect-all-keys" class="px-3 py-1 bg-zinc-700 rounded hover:bg-zinc-600 text-xs">Deselect All</button>
+              </div>
+              
+              <div id="sync-keys-container" class="max-h-60 overflow-y-auto bg-zinc-900/50 rounded p-2" style="border:1px solid #52525b">
+                ${this.renderKeysCategories(categories, selectedKeys)}
+              </div>
+            </div>
+
             <div id="countdown-container" class="bg-zinc-800/50 rounded p-3 text-center" style="display:${this.nextSyncTime ? 'block' : 'none'}">
               <div id="sync-countdown" class="text-sm text-zinc-300 font-mono"></div>
             </div>
@@ -1696,12 +2003,14 @@ if (window.typingMindFirebaseSync) {
           <div id="action-msg" class="text-center text-sm text-zinc-400"></div>
           
           <div class="text-center mt-4 pt-3 text-xs text-zinc-500 border-t border-zinc-700">
-            V1.1 - Device: ${this.firebase.deviceId.substr(0, 15)}... - Add ?log=true for debug
+            V1.5 - Device: ${this.firebase.deviceId.substr(0, 15)}... - Add ?log=true for debug
           </div>
         </div>`;
       
       overlay.appendChild(modal);
       document.body.appendChild(overlay);
+
+      this.setupKeysListeners(modal, categories, selectedKeys);
 
       if (this.nextSyncTime) {
         this.startCountdown();
@@ -1720,6 +2029,129 @@ if (window.typingMindFirebaseSync) {
       });
       modal.querySelector('#save-settings').addEventListener('click', () => this.saveSettings(modal, overlay));
       modal.querySelector('#sync-now').addEventListener('click', () => this.handleSyncNow(modal));
+    }
+    
+    renderKeysCategories(categories, selectedKeys) {
+      let html = '';
+      
+      Object.entries(categories).forEach(([category, keys]) => {
+        const safeCategoryId = category.replace(/[^a-zA-Z0-9]/g, '-');
+        
+        html += `
+          <div class="mb-3">
+            <div class="flex items-center gap-2 mb-1 pb-1 border-b border-zinc-700">
+              <input 
+                type="checkbox" 
+                id="cat-${safeCategoryId}" 
+                class="category-checkbox w-4 h-4 rounded"
+                data-category="${category}"
+              >
+              <label for="cat-${safeCategoryId}" class="text-xs font-semibold text-zinc-300 cursor-pointer">
+                ${category} (${keys.length})
+              </label>
+            </div>
+            <div class="ml-6 space-y-1">
+              ${keys.map(key => `
+                <label class="flex items-center gap-2 cursor-pointer hover:bg-zinc-800/50 p-1 rounded">
+                  <input 
+                    type="checkbox" 
+                    class="key-checkbox w-4 h-4 rounded" 
+                    data-key="${key}"
+                    data-category="${category}"
+                    ${selectedKeys.includes(key) ? 'checked' : ''}
+                  >
+                  <span class="text-xs font-mono text-zinc-400">${key}</span>
+                </label>
+              `).join('')}
+            </div>
+          </div>
+        `;
+      });
+      
+      return html || '<p class="text-xs text-zinc-500 p-2">No keys found</p>';
+    }
+    
+    setupKeysListeners(modal, categories, selectedKeys) {
+      const container = modal.querySelector('#sync-keys-container');
+      const searchInput = modal.querySelector('#keys-search');
+      const selectAllBtn = modal.querySelector('#select-all-keys');
+      const deselectAllBtn = modal.querySelector('#deselect-all-keys');
+      const selectedCountEl = modal.querySelector('#selected-count');
+      
+      const updateCategoryCheckboxes = () => {
+        Object.keys(categories).forEach(category => {
+          const safeCategoryId = category.replace(/[^a-zA-Z0-9]/g, '-');
+          const catCheckbox = modal.querySelector(`#cat-${safeCategoryId}`);
+          if (!catCheckbox) return;
+          
+          const keyCheckboxes = modal.querySelectorAll(`.key-checkbox[data-category="${category}"]`);
+          const checkedCount = Array.from(keyCheckboxes).filter(cb => cb.checked).length;
+          
+          catCheckbox.checked = checkedCount > 0;
+          catCheckbox.indeterminate = checkedCount > 0 && checkedCount < keyCheckboxes.length;
+        });
+      };
+      
+      const updateSelectedCount = () => {
+        const checked = modal.querySelectorAll('.key-checkbox:checked').length;
+        selectedCountEl.textContent = `${checked} selected`;
+      };
+      
+      container.addEventListener('change', (e) => {
+        if (e.target.classList.contains('key-checkbox')) {
+          updateCategoryCheckboxes();
+          updateSelectedCount();
+        }
+      });
+      
+      container.addEventListener('change', (e) => {
+        if (e.target.classList.contains('category-checkbox')) {
+          const category = e.target.dataset.category;
+          const checked = e.target.checked;
+          const keyCheckboxes = modal.querySelectorAll(`.key-checkbox[data-category="${category}"]`);
+          
+          keyCheckboxes.forEach(cb => {
+            cb.checked = checked;
+          });
+          
+          updateSelectedCount();
+        }
+      });
+      
+      searchInput.addEventListener('input', (e) => {
+        const search = e.target.value.toLowerCase();
+        const allLabels = container.querySelectorAll('label[class*="flex items-center"]');
+        
+        allLabels.forEach(label => {
+          const text = label.textContent.toLowerCase();
+          const shouldShow = text.includes(search);
+          label.style.display = shouldShow ? 'flex' : 'none';
+        });
+        
+        const categoryDivs = container.querySelectorAll('.mb-3');
+        categoryDivs.forEach(div => {
+          const visibleKeys = div.querySelectorAll('label[style="display: flex;"], label:not([style])');
+          div.style.display = visibleKeys.length > 0 ? 'block' : 'none';
+        });
+      });
+      
+      selectAllBtn.addEventListener('click', () => {
+        const visibleCheckboxes = Array.from(modal.querySelectorAll('.key-checkbox'))
+          .filter(cb => cb.closest('label').style.display !== 'none');
+        visibleCheckboxes.forEach(cb => cb.checked = true);
+        updateCategoryCheckboxes();
+        updateSelectedCount();
+      });
+      
+      deselectAllBtn.addEventListener('click', () => {
+        const visibleCheckboxes = Array.from(modal.querySelectorAll('.key-checkbox'))
+          .filter(cb => cb.closest('label').style.display !== 'none');
+        visibleCheckboxes.forEach(cb => cb.checked = false);
+        updateCategoryCheckboxes();
+        updateSelectedCount();
+      });
+      
+      updateCategoryCheckboxes();
     }
     
     async saveSettings(modal, overlay) {
@@ -1747,6 +2179,10 @@ if (window.typingMindFirebaseSync) {
         actionMsg.style.color = '#ef4444';
         return;
       }
+
+      const selectedKeys = Array.from(modal.querySelectorAll('.key-checkbox:checked'))
+        .map(cb => cb.dataset.key);
+      this.config.saveSelectedSyncKeys(selectedKeys);
 
       Object.keys(newConfig).forEach(k => this.config.set(k, newConfig[k]));
       this.config.save();
